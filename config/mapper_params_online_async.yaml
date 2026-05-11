@@ -1,0 +1,15 @@
+slam_toolbox:
+  ros__parameters:
+    # 1. THE HEARTBEAT: Change from 5.0 to 0.5 or 1.0
+    # This forces the map to refresh its 'truth' every half-second
+    map_update_interval: 0.5
+
+    # 2. THE SENSITIVITY: Lower these numbers
+    # Tells SLAM to process a correction even if you only moved a tiny bit
+    minimum_travel_distance: 0.02 
+    minimum_travel_heading: 0.02
+
+    # 3. THE MEMORY: Increase scan matching
+    # Helps the robot 'recognize' where it is faster
+    scan_buffer_size: 40
+    link_match_minimum_response_fine: 0.1
