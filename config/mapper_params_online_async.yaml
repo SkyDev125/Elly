@@ -1,15 +1,27 @@
 slam_toolbox:
   ros__parameters:
-    # 1. THE HEARTBEAT: Change from 5.0 to 0.5 or 1.0
-    # This forces the map to refresh its 'truth' every half-second
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint 
+    scan_topic: /scan
+    mode: mapping
+
+    # 1. THE HEARTBEAT: Only push updates to Rviz every 5 seconds.
+    # Running this bare-metal means we need to give the CPU room to breathe.
     map_update_interval: 0.5
 
-    # 2. THE SENSITIVITY: Lower these numbers
-    # Tells SLAM to process a correction even if you only moved a tiny bit
-    minimum_travel_distance: 0.02 
-    minimum_travel_heading: 0.02
+    # 2. THE SENSITIVITY: Wait for actual physical movement before updating the grid.
+    # This ignores the tiny odometry errors and wheel slips that cause double-walls.
+    minimum_travel_distance: 0.2
+    minimum_travel_heading: 0.2
 
-    # 3. THE MEMORY: Increase scan matching
-    # Helps the robot 'recognize' where it is faster
+    # 3. THE MEMORY & MATCHING: Demand high-confidence lidar overlap.
+    # Rejects distorted scans caused by fast turns or slipping.
     scan_buffer_size: 40
-    link_match_minimum_response_fine: 0.1
+    link_match_minimum_response_fine: 0.35
+
+    # 4. THE SEARCH WINDOW: Look in a wider radius to stitch scans.
+    # Helps the algorithm recover if the odometry drifts slightly.
+    correlation_search_space_dimension: 0.3
+    correlation_search_space_resolution: 0.05
+    resolution: 0.05

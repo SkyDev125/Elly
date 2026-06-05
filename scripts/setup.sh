@@ -46,6 +46,7 @@ echo "[✔] Brain deployment complete!"
 
 # 2. WSL GRAPHICS FIX
 # ------------------------------------------------
+echo "Step 2: Applying WSL Fix if necessary"
 if grep -qiE "(Microsoft|WSL)" /proc/version &> /dev/null; then
     if ! grep -q "LIBGL_ALWAYS_SOFTWARE" ~/.bashrc; then
       echo 'export LIBGL_ALWAYS_SOFTWARE=1' >> ~/.bashrc
@@ -55,7 +56,7 @@ fi
 
 # 3. BUILD LOCAL ASSETS
 # ------------------------------------------------
-echo "Step 2: Building local robot description meshes..."
+echo "Step 3: Building local robot description meshes..."
 cd "$REPO_DIR"
 colcon build --packages-select myagv_description --symlink-install
 
@@ -63,56 +64,40 @@ colcon build --packages-select myagv_description --symlink-install
 # ------------------------------------------------
 echo "Step 3: Updating Master Aliases..."
 
-# Clean up ALL Elly aliases so we don't get duplicates on multiple runs
-sed -i '/alias start_rviz/d' ~/.bashrc
-sed -i '/alias teleop/d' ~/.bashrc
-sed -i '/alias map_/d' ~/.bashrc
-sed -i '/alias camera_/d' ~/.bashrc
-sed -i '/alias lidar_/d' ~/.bashrc
-sed -i '/alias robot_/d' ~/.bashrc
-sed -i '/alias elly/d' ~/.bashrc
-sed -i '/export NANO_IP=/d' ~/.bashrc
-sed -i '/export NANO_USER=/d' ~/.bashrc
+# Safely wipe the old Elly block (if it exists) so we don't duplicate
+sed -i '/# === ELLY OS START ===/,/# === ELLY OS END ===/d' ~/.bashrc
 
-# Export variables so our helper scripts know where the robot is
-echo "export NANO_IP='$NANO_IP'" >> ~/.bashrc
-echo "export NANO_USER='$NANO_USER'" >> ~/.bashrc
-
-# Dashboard & Drive
-echo "alias start_rviz='source $REPO_DIR/install/setup.bash && rviz2 -d $REPO_DIR/rviz/elly_dash.rviz'" >> ~/.bashrc
-echo "alias teleop='ros2 run teleop_twist_keyboard teleop_twist_keyboard'" >> ~/.bashrc
-
-# --- THE REMOTE CONTROL SUITE (The New Brain Toggles) ---
+# The remote command prefix
 BRAIN="bash ~/scripts/brain.sh"
 
-# Camera Controls
-echo "alias camera_on='ssh \$NANO_USER@\$NANO_IP \"$BRAIN camera_on\"'" >> ~/.bashrc
-echo "alias camera_off='ssh \$NANO_USER@\$NANO_IP \"$BRAIN camera_off\"'" >> ~/.bashrc
+# Append the new block cleanly using a Heredoc
+cat << EOF >> ~/.bashrc
+# === ELLY OS START ===
+export NANO_IP='$NANO_IP'
+export NANO_USER='$NANO_USER'
 
-# Lidar & Base Controls
-echo "alias lidar_on='ssh \$NANO_USER@\$NANO_IP \"$BRAIN lidar_on\"'" >> ~/.bashrc
-echo "alias lidar_off='ssh \$NANO_USER@\$NANO_IP \"$BRAIN lidar_off\"'" >> ~/.bashrc
+alias start_rviz='source $REPO_DIR/install/setup.bash && rviz2 -d $REPO_DIR/rviz/elly_dash.rviz'
+alias teleop='ros2 run teleop_twist_keyboard teleop_twist_keyboard'
 
-# 2D Mapping
-echo "alias map_2d_on='ssh \$NANO_USER@\$NANO_IP \"$BRAIN map_2d_on\"'" >> ~/.bashrc
-echo "alias map_2d_off='ssh \$NANO_USER@\$NANO_IP \"$BRAIN map_2d_off\"'" >> ~/.bashrc
+alias camera_on='ssh \$NANO_USER@\$NANO_IP "$BRAIN camera_on"'
+alias camera_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN camera_off"'
+alias lidar_on='ssh \$NANO_USER@\$NANO_IP "$BRAIN lidar_on"'
+alias lidar_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN lidar_off"'
+alias map_2d_on='bash $REPO_DIR/scripts/start_map_2d.sh'
+alias map_2d_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN map_2d_off"'
+alias map_3d_on='ssh \$NANO_USER@\$NANO_IP "$BRAIN map_on"'
+alias map_3d_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN map_off"'
 
-# 3D Mapping (RTAB-Map)
-echo "alias map_3d_on='ssh \$NANO_USER@\$NANO_IP \"$BRAIN map_on\"'" >> ~/.bashrc
-echo "alias map_3d_off='ssh \$NANO_USER@\$NANO_IP \"$BRAIN map_off\"'" >> ~/.bashrc
+alias robot_status='ssh \$NANO_USER@\$NANO_IP "screen -ls"'
+alias robot_peek='ssh -t \$NANO_USER@\$NANO_IP "screen -r"'
+alias robot_find_me='ssh \$NANO_USER@\$NANO_IP "source /opt/ros/galactic/setup.bash && ros2 service call /reinitialize_global_localization std_srvs/srv/Empty"'
 
-# Utilities
-echo "alias robot_status='ssh \$NANO_USER@\$NANO_IP \"screen -ls\"'" >> ~/.bashrc
-echo "alias robot_peek='ssh -t \$NANO_USER@\$NANO_IP \"screen -r\"'" >> ~/.bashrc
+alias map_2d_save='bash $REPO_DIR/scripts/save_room.sh 2d'
+alias map_2d_load='bash $REPO_DIR/scripts/load_room.sh 2d'
+alias map_3d_save='bash $REPO_DIR/scripts/save_room.sh 3d'
+alias map_3d_load='bash $REPO_DIR/scripts/load_room.sh 3d'
 
-# Map Management
-echo "alias map_2d_save='bash $REPO_DIR/scripts/save_room.sh 2d'" >> ~/.bashrc
-echo "alias map_2d_load='bash $REPO_DIR/scripts/load_room.sh 2d'" >> ~/.bashrc
-echo "alias map_3d_save='bash $REPO_DIR/scripts/save_room.sh 3d'" >> ~/.bashrc
-echo "alias map_3d_load='bash $REPO_DIR/scripts/load_room.sh 3d'" >> ~/.bashrc
-
-# --- THE HELP MENU (The elly command) ---
-echo "alias elly='echo \"
+alias elly='echo "
 Elly OS - Command Reference
 ------------------------------------------------
 TOGGLES (Nano Background):
@@ -124,6 +109,7 @@ TOGGLES (Nano Background):
 MAP MANAGEMENT:
   map_2d_save / map_2d_load - Manage .yaml/.pgm files
   map_3d_save / map_3d_load - Manage .db database files
+  robot_find_me - Trigger Global Localization
 
 DRIVING & VISUALS:
   teleop         - Keyboard Control (Laptop)
@@ -132,7 +118,9 @@ DRIVING & VISUALS:
 DIAGNOSTICS & DATA:
   robot_status   - List active Nano processes
   robot_peek [n] - View live logs of a session
-------------------------------------------------\"'" >> ~/.bashrc
+------------------------------------------------"'
+# === ELLY OS END ===
+EOF
 
 echo "------------------------------------------------"
 echo "Setup Complete! Run: source ~/.bashrc"

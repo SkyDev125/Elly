@@ -30,10 +30,12 @@ case "$1" in
     screen -XS rtabmap quit && echo "RTAB-Map (3D) stopped."
     ;;
   map_2d_on)
-    screen -dmS slam_2d bash -c "$GALACTIC && $MYAGV && ros2 launch slam_toolbox online_async_launch.py"
-    echo "Slam Toolbox (2D) started."
+    # Swapped slam_toolbox for the manufacturer's gmapping
+    screen -dmS slam_2d bash -c "$GALACTIC && $MYAGV && ros2 launch slam_gmapping slam_gmapping.launch.py"
+    echo "Gmapping (2D) started as map_2d."
     ;;
   map_2d_off)
-    screen -XS slam_2d quit && echo "Slam Toolbox (2D) stopped."
+    # Ensure the kill command matches the screen name above
+    screen -XS slam_2d quit && echo "Gmapping stopped."
     ;;
 esac
