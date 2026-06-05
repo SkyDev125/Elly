@@ -1,4 +1,0 @@
-Invoking command in '/home/sky/elly_lp/build/myagv_description': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/galactic /usr/bin/cmake --build /home/sky/elly_lp/build/myagv_description -- -j16 -l16
-Invoked command in '/home/sky/elly_lp/build/myagv_description' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/galactic /usr/bin/cmake --build /home/sky/elly_lp/build/myagv_description -- -j16 -l16
-Invoking command in '/home/sky/elly_lp/build/myagv_description': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/galactic /usr/bin/cmake --install /home/sky/elly_lp/build/myagv_description
-Invoked command in '/home/sky/elly_lp/build/myagv_description' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/galactic /usr/bin/cmake --install /home/sky/elly_lp/build/myagv_description
