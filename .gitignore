@@ -5,3 +5,9 @@ log/
 
 # Local maps
 maps/
+
+# Movement experiment output and Python caches
+runs/
+__pycache__/
+*.pyc
+*.log

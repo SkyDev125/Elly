@@ -78,20 +78,18 @@ else
     exit 1
 fi
 
-# 1.5 OVER-THE-AIR (OTA) BRAIN DEPLOYMENT
+# 1.5 OVER-THE-AIR (OTA) DEPLOYMENT
 # ------------------------------------------------
-echo "Step 1.5: Pushing Elly OS Brain to Jetson Nano..."
+echo "Step 1.5: Deploying Elly robot scripts to Jetson Nano..."
 
-# Check and install 'screen' on the Nano if it's missing
 echo "[i] Checking Nano dependencies..."
 ssh -t $NANO_USER@$NANO_IP "dpkg -l | grep -qw screen || (echo '[!] Screen missing. Installing now...' && sudo apt update && sudo apt install screen -y)"
 
-# Create remote folder, push the local brain.sh, and make it executable
-echo "[i] Pushing local brain.sh to Nano..."
+echo "[i] Creating remote directory ~/scripts..."
 ssh $NANO_USER@$NANO_IP "mkdir -p ~/scripts"
-scp "$REPO_DIR/scripts/brain.sh" $NANO_USER@$NANO_IP:~/scripts/brain.sh
-ssh $NANO_USER@$NANO_IP "chmod +x ~/scripts/brain.sh"
-echo "[✔] Brain deployment complete!"
+echo "[i] Copying brain.sh and brain.py to Jetson Nano..."
+scp "$REPO_DIR/scripts/brain.sh" "$REPO_DIR/scripts/brain.py" $NANO_USER@$NANO_IP:~/scripts/
+ssh $NANO_USER@$NANO_IP "chmod +x ~/scripts/brain.sh ~/scripts/brain.py"
 
 # 2. WSL GRAPHICS FIX
 # ------------------------------------------------
@@ -118,7 +116,7 @@ echo "Step 3: Updating Master Aliases..."
 sed -i '/# === ELLY OS START ===/,/# === ELLY OS END ===/d' ~/.bashrc
 
 # The remote command prefix
-BRAIN="bash ~/scripts/brain.sh"
+BRAIN="bash /home/$NANO_USER/scripts/brain.sh"
 
 # Append the new block cleanly using a Heredoc
 cat << EOF >> ~/.bashrc
@@ -134,35 +132,60 @@ alias teleop='ros2 run teleop_twist_keyboard teleop_twist_keyboard'
 
 alias camera_on='ssh \$NANO_USER@\$NANO_IP "$BRAIN camera_on"'
 alias camera_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN camera_off"'
+alias base_on='ssh \$NANO_USER@\$NANO_IP "$BRAIN base_on"'
+alias base_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN base_off"'
 alias lidar_on='ssh \$NANO_USER@\$NANO_IP "$BRAIN lidar_on"'
 alias lidar_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN lidar_off"'
-alias map_2d_on='bash $REPO_DIR/scripts/start_map_2d.sh'
+alias map_2d_on='ssh \$NANO_USER@\$NANO_IP "$BRAIN map_2d_on"'
 alias map_2d_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN map_2d_off"'
 alias map_3d_on='ssh \$NANO_USER@\$NANO_IP "$BRAIN map_on"'
 alias map_3d_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN map_off"'
+alias motion_on='ssh \$NANO_USER@\$NANO_IP "$BRAIN motion_on"'
+alias motion_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN motion_off"'
+alias nav_off='ssh \$NANO_USER@\$NANO_IP "$BRAIN nav_off"'
 
 alias robot_status='ssh \$NANO_USER@\$NANO_IP "screen -ls"'
 alias robot_peek='ssh -t \$NANO_USER@\$NANO_IP "screen -r"'
-alias robot_find_me='ssh \$NANO_USER@\$NANO_IP "source /opt/ros/galactic/setup.bash && ros2 service call /reinitialize_global_localization std_srvs/srv/Empty"'
 
 alias map_2d_save='bash $REPO_DIR/scripts/save_room.sh 2d'
 alias map_2d_load='bash $REPO_DIR/scripts/load_room.sh 2d'
 alias map_3d_save='bash $REPO_DIR/scripts/save_room.sh 3d'
 alias map_3d_load='bash $REPO_DIR/scripts/load_room.sh 3d'
 
+alias elly_move='python3 $REPO_DIR/scripts/elly_move.py'
+alias elly_nav='python3 $REPO_DIR/scripts/elly_navigate.py'
+alias elly_autofind='python3 $REPO_DIR/scripts/elly_autofind.py'
+elly_move_stop() {
+  ssh "\$NANO_USER@\$NANO_IP" python3 /home/\$NANO_USER/scripts/brain.py stop_motion
+}
+elly_move_status() {
+  ssh "\$NANO_USER@\$NANO_IP" python3 /home/\$NANO_USER/scripts/brain.py status
+}
+
+alias elly_redeploy='scp $REPO_DIR/scripts/brain.sh $REPO_DIR/scripts/brain.py \$NANO_USER@\$NANO_IP:~/scripts/ && ssh \$NANO_USER@\$NANO_IP "chmod +x ~/scripts/brain.sh ~/scripts/brain.py"'
+
 alias elly='echo "
 Elly OS - Command Reference
 ------------------------------------------------
 TOGGLES (Nano Background):
-  lidar_on/off   - Base Driver & LiDAR
+  base_on/off    - Base driver only (odometry tests)
+  lidar_on/off   - Base driver and LiDAR
   camera_on/off  - Orbbec Astra Depth Camera
-  map_2d_on/off  - SLAM Toolbox (2D)
+  map_2d_on/off  - Gmapping (2D, no remote RViz)
   map_3d_on/off  - RTAB-Map (3D)
+
+MOVEMENT COMMANDS:
+  motion_on / motion_off
+  elly_move <dir> <amount> [speed]
+  elly_move sequence <json_or_file>
+  elly_move_stop / elly_move_status
+  elly_nav <x> <y> [yaw_deg]          - Navigate programmatically to map coordinates
+  elly_autofind  - Run automated self-localization search using LiDAR and covariance tracking
+  nav_off        - Turn off background navigation
 
 MAP MANAGEMENT:
   map_2d_save / map_2d_load - Manage .yaml/.pgm files
   map_3d_save / map_3d_load - Manage .db database files
-  robot_find_me - Trigger Global Localization
 
 DRIVING & VISUALS:
   teleop         - Keyboard Control (Laptop)
@@ -171,6 +194,7 @@ DRIVING & VISUALS:
 DIAGNOSTICS & DATA:
   robot_status   - List active Nano processes
   robot_peek [n] - View live logs of a session
+  elly_redeploy  - Push updated brain scripts to Nano over WiFi
 ------------------------------------------------"'
 # === ELLY OS END ===
 EOF
