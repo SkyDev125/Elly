@@ -1,1 +1,0 @@
-/home/sky/elly_lp/build/myagv_description/ament_cmake_core/myagv_descriptionConfig.cmake

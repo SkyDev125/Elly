@@ -1,1 +1,7 @@
-*.log
+# ROS 2 build and workspace artifacts
+build/
+install/
+log/
+
+# Local maps
+maps/
