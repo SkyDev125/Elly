@@ -7,6 +7,55 @@ echo "------------------------------------------------"
 echo "Starting Elly OS: Automated Link & Consolidation"
 echo "[i] Repo Root: $REPO_DIR"
 
+# ========================================================
+# STEP 0: PRE-FLIGHT SYSTEM AUDIT & ROS 2 GALACTIC INSTALLER
+# ========================================================
+echo "Step -1: Auditing Host System Architecture..."
+
+# 1. Verify Ubuntu Version
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    if [ "$VERSION_ID" != "20.04" ]; then
+        echo "[✘] Error: This script requires Ubuntu 20.04 (Focal Fossa). Found version $VERSION_ID."
+        exit 1
+    fi
+    echo "[✔] OS Check Passed: Ubuntu 20.04 detected."
+else
+    echo "[✘] Error: Cannot determine OS version. /etc/os-release missing."
+    exit 1
+fi
+
+# 2. Check if ROS 2 Galactic is already installed
+if [ -f /opt/ros/galactic/setup.bash ]; then
+    echo "[✔] ROS 2 Galactic installation detected at /opt/ros/galactic."
+else
+    echo "[!] ROS 2 Galactic not found! Starting automated background installation..."
+    echo "[i] Requesting sudo privileges for package management."
+    
+    # Set up ROS 2 apt repository
+    sudo apt update && sudo apt install curl gnupg2 lsb-release -y
+    sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+    
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.p/ros2.list > /dev/null
+    
+    # Install ROS 2 Galactic Desktop and build tools
+    sudo apt update
+    sudo apt install ros-galactic-desktop python3-colcon-common-extensions python3-rosdep -y
+    
+    # Initialize rosdep if not already done
+    if [ ! -f /etc/ros/rosdep/sources.list.d/20-default.list ]; then
+        sudo rosdep init
+    fi
+    rosdep update
+    
+    if [ -f /opt/ros/galactic/setup.bash ]; then
+        echo "[✔] ROS 2 Galactic successfully installed!"
+    else
+        echo "[✘] Installation failed. Please check your network connection or repository logs."
+        exit 1
+    fi
+fi
+
 # 1. SSH AUTO-LINK (Step 0: The "Annoyance Killer")
 # ------------------------------------------------
 if [ ! -f ~/.ssh/id_rsa ]; then
