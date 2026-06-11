@@ -58,6 +58,7 @@ fi
 # ------------------------------------------------
 echo "Step 3: Building local robot description meshes..."
 cd "$REPO_DIR"
+source /opt/ros/galactic/setup.bash
 colcon build --packages-select myagv_description --symlink-install
 
 # 4. CONSOLIDATE ALIASES & ENV VARS
@@ -73,6 +74,9 @@ BRAIN="bash ~/scripts/brain.sh"
 # Append the new block cleanly using a Heredoc
 cat << EOF >> ~/.bashrc
 # === ELLY OS START ===
+# Core Environment Sources
+source /opt/ros/galactic/setup.bash
+
 export NANO_IP='$NANO_IP'
 export NANO_USER='$NANO_USER'
 
