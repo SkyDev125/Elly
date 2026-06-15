@@ -5,6 +5,19 @@ Each dictionary should have:
   - "direction": "forward" | "back" | "left" | "right" | "rotate_left" | "rotate_right" | "stop" | "hold" | "navigate"
   - "amount": distance in meters (for translation), angle in degrees (for rotation), seconds (for stop/hold), or [x, y, yaw_deg] (for navigate)
   - "speed": (optional) speed in m/s (default 0.1) or rad/s (default 0.3)
+
+
+# Human location
+[-2.4, -1.4, 190]
+
+# In front of human
+[-1.6, -1.1, 190]
+
+# In front of human's path (broadside)
+[0, 0, 120]
+
+# Behind human
+[-3.2, -1.7, 30]
 """
 
 def low():
@@ -57,22 +70,7 @@ def move_to_point(x=-3.2, y=-1.7, yaw_deg=30):
     ]
 
 
-def navigate_to_point():
-    """Backward-compatible name for the original fixed destination."""
-    return move_to_point()
-
-
-def move_behind_human(x=-3.2, y=-1.7, yaw_deg=30):
-    """Backward-compatible descriptive name."""
-    return move_to_point(x, y, yaw_deg)
-
-
-def move_to_behind_human_point():
-    """Backward-compatible name for the original fixed destination."""
-    return move_behind_human()
-
-
-def creep_in(target_distance=0.5, speed=0.05, duration=30.0):
+def creep_in(target_distance=0.4, speed=0.05, duration=30.0):
     """Slowly creep forward, stopping when close to human's legs or obstacles.
     
     If the human moves away, the robot continues creeping forward to maintain target_distance.
@@ -124,9 +122,6 @@ def follow_me(
         }
     ]
 
-
-def temp():
-    return follow_me(-3.2, -1.7, 190, 0.4, 30, 0.5, 15.0)
 
 def stop():
     """Stop and hold position for 5 seconds."""
