@@ -87,9 +87,12 @@ ssh -t $NANO_USER@$NANO_IP "dpkg -l | grep -qw screen || (echo '[!] Screen missi
 
 echo "[i] Creating remote directory ~/scripts..."
 ssh $NANO_USER@$NANO_IP "mkdir -p ~/scripts"
-echo "[i] Copying brain.sh and brain.py to Jetson Nano..."
-scp "$REPO_DIR/scripts/brain.sh" "$REPO_DIR/scripts/brain.py" $NANO_USER@$NANO_IP:~/scripts/
-ssh $NANO_USER@$NANO_IP "chmod +x ~/scripts/brain.sh ~/scripts/brain.py"
+echo "[i] Copying robot controller modules to Jetson Nano..."
+scp \
+    "$REPO_DIR/scripts/brain.sh" \
+    "$REPO_DIR/scripts/brain.py" \
+    $NANO_USER@$NANO_IP:~/scripts/
+ssh $NANO_USER@$NANO_IP "chmod +x ~/scripts/brain.sh ~/scripts/brain.py; rm -f ~/scripts/follow_me.py"
 
 # 2. WSL GRAPHICS FIX
 # ------------------------------------------------
@@ -162,8 +165,6 @@ elly_move_status() {
   ssh "\$NANO_USER@\$NANO_IP" python3 /home/\$NANO_USER/scripts/brain.py status
 }
 
-alias elly_redeploy='scp $REPO_DIR/scripts/brain.sh $REPO_DIR/scripts/brain.py \$NANO_USER@\$NANO_IP:~/scripts/ && ssh \$NANO_USER@\$NANO_IP "chmod +x ~/scripts/brain.sh ~/scripts/brain.py"'
-
 alias elly='echo "
 Elly OS - Command Reference
 ------------------------------------------------
@@ -194,7 +195,6 @@ DRIVING & VISUALS:
 DIAGNOSTICS & DATA:
   robot_status   - List active Nano processes
   robot_peek [n] - View live logs of a session
-  elly_redeploy  - Push updated brain scripts to Nano over WiFi
 ------------------------------------------------"'
 # === ELLY OS END ===
 EOF

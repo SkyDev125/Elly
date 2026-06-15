@@ -7,6 +7,8 @@ as a ROS 2 node, and sending movement commands/sequences to the service.
 """
 
 import argparse
+from dataclasses import dataclass
+from enum import Enum
 import json
 import math
 import os
@@ -69,6 +71,237 @@ def normalize_angle(angle: float) -> float:
 
 def unwrap_angle(previous_wrapped: float, current_wrapped: float, previous_unwrapped: float) -> float:
     return previous_unwrapped + normalize_angle(current_wrapped - previous_wrapped)
+
+
+class FollowState(str, Enum):
+    WAITING_INITIAL = "waiting_initial"
+    NAVIGATING = "navigating"
+    TURNING_TO_HUMAN = "turning_to_human"
+    WAITING_LOOKBACK = "waiting_lookback"
+    TURNING_TO_PATH = "turning_to_path"
+    TURNING_AT_GOAL = "turning_at_goal"
+    WAITING_AT_GOAL = "waiting_at_goal"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    STOPPED = "stopped"
+
+
+class FollowEvent(str, Enum):
+    HUMAN_FOUND = "human_found"
+    HUMAN_TIMEOUT = "human_timeout"
+    LOOK_DUE = "look_due"
+    GOAL_REACHED = "goal_reached"
+    NAVIGATION_FAILED = "navigation_failed"
+    ROTATION_COMPLETE = "rotation_complete"
+    ROTATION_FAILED = "rotation_failed"
+    STOP_REQUESTED = "stop_requested"
+
+
+@dataclass(frozen=True)
+class FollowMeConfig:
+    look_interval: float = 20.0
+    detect_range: float = 0.5
+    wait_timeout: float = 15.0
+    scan_max_age: float = 0.8
+    sector_half_angle_deg: float = 30.0
+    confirm_samples: int = 3
+
+    def validate(self) -> None:
+        positive = {
+            "look_interval": self.look_interval,
+            "detect_range": self.detect_range,
+            "wait_timeout": self.wait_timeout,
+            "scan_max_age": self.scan_max_age,
+            "sector_half_angle_deg": self.sector_half_angle_deg,
+        }
+        for name, value in positive.items():
+            if value <= 0:
+                raise ValueError("%s must be greater than zero" % name)
+        if self.confirm_samples < 1:
+            raise ValueError("confirm_samples must be at least one")
+        if self.sector_half_angle_deg > 90.0:
+            raise ValueError("sector_half_angle_deg must be no more than 90 degrees")
+
+
+@dataclass(frozen=True)
+class FollowResult:
+    ok: bool
+    reason: str
+    message: str
+
+
+class FollowStateMachine:
+    def __init__(self) -> None:
+        self.state = FollowState.WAITING_INITIAL
+
+    def transition(self, event: FollowEvent) -> FollowState:
+        if event == FollowEvent.STOP_REQUESTED:
+            self.state = FollowState.STOPPED
+            return self.state
+        if event in (FollowEvent.NAVIGATION_FAILED, FollowEvent.ROTATION_FAILED):
+            self.state = FollowState.FAILED
+            return self.state
+
+        transitions = {
+            (FollowState.WAITING_INITIAL, FollowEvent.HUMAN_FOUND): FollowState.NAVIGATING,
+            (FollowState.WAITING_INITIAL, FollowEvent.HUMAN_TIMEOUT): FollowState.FAILED,
+            (FollowState.NAVIGATING, FollowEvent.LOOK_DUE): FollowState.TURNING_TO_HUMAN,
+            (FollowState.NAVIGATING, FollowEvent.GOAL_REACHED): FollowState.TURNING_AT_GOAL,
+            (
+                FollowState.TURNING_TO_HUMAN,
+                FollowEvent.ROTATION_COMPLETE,
+            ): FollowState.WAITING_LOOKBACK,
+            (FollowState.WAITING_LOOKBACK, FollowEvent.HUMAN_FOUND): FollowState.TURNING_TO_PATH,
+            (FollowState.WAITING_LOOKBACK, FollowEvent.HUMAN_TIMEOUT): FollowState.FAILED,
+            (
+                FollowState.TURNING_TO_PATH,
+                FollowEvent.ROTATION_COMPLETE,
+            ): FollowState.NAVIGATING,
+            (
+                FollowState.TURNING_AT_GOAL,
+                FollowEvent.ROTATION_COMPLETE,
+            ): FollowState.WAITING_AT_GOAL,
+            (FollowState.WAITING_AT_GOAL, FollowEvent.HUMAN_FOUND): FollowState.COMPLETED,
+            (FollowState.WAITING_AT_GOAL, FollowEvent.HUMAN_TIMEOUT): FollowState.FAILED,
+        }
+        key = (self.state, event)
+        if key not in transitions:
+            raise ValueError("Invalid follow-me transition: %s + %s" % key)
+        self.state = transitions[key]
+        return self.state
+
+
+class FollowMeRunner:
+    def __init__(self, runtime, goal, config: FollowMeConfig) -> None:
+        config.validate()
+        self.runtime = runtime
+        self.goal = goal
+        self.config = config
+        self.machine = FollowStateMachine()
+
+    def _state(self, message: str) -> None:
+        self.runtime.set_state(self.machine.state.value, message)
+
+    def _stop_result(self) -> FollowResult:
+        self.machine.transition(FollowEvent.STOP_REQUESTED)
+        self._state("Follow-me stopped by operator")
+        return FollowResult(False, "operator_stop", "Follow-me stopped by operator")
+
+    def _rotation_failed(self, message: str) -> FollowResult:
+        self.machine.transition(FollowEvent.ROTATION_FAILED)
+        self._state(message)
+        return FollowResult(False, "rotation_failed", message)
+
+    def run(self) -> FollowResult:
+        self._state("Waiting for a person in the visible LiDAR sector")
+        found = self.runtime.wait_for_person(
+            "front",
+            self.config.wait_timeout,
+            require_foreground=False,
+        )
+        if self.runtime.stop_requested():
+            return self._stop_result()
+        if not found:
+            self.machine.transition(FollowEvent.HUMAN_TIMEOUT)
+            message = "No person was detected in the visible LiDAR sector before the wait timeout"
+            self._state(message)
+            return FollowResult(False, "initial_human_timeout", message)
+
+        self.machine.transition(FollowEvent.HUMAN_FOUND)
+        while True:
+            self._state("Navigating to the goal")
+            navigation = self.runtime.start_navigation(self.goal)
+            if navigation is None:
+                if self.runtime.stop_requested():
+                    return self._stop_result()
+                self.machine.transition(FollowEvent.NAVIGATION_FAILED)
+                message = "Nav2 rejected or failed to start the goal"
+                self._state(message)
+                return FollowResult(False, "navigation_start_failed", message)
+
+            event, detail = self.runtime.wait_for_navigation(
+                navigation,
+                self.config.look_interval,
+            )
+            if event == FollowEvent.STOP_REQUESTED:
+                self.runtime.cancel_navigation(navigation)
+                return self._stop_result()
+            if event == FollowEvent.NAVIGATION_FAILED:
+                self.machine.transition(event)
+                self._state(detail)
+                return FollowResult(False, "navigation_failed", detail)
+            if event == FollowEvent.GOAL_REACHED:
+                self.machine.transition(event)
+                if not self.runtime.complete_destination():
+                    if self.runtime.stop_requested():
+                        return self._stop_result()
+                    self.machine.transition(FollowEvent.NAVIGATION_FAILED)
+                    message = "Could not finish the move_to_point() movement"
+                    self._state(message)
+                    return FollowResult(False, "destination_finish_failed", message)
+                self._state("Goal reached; turning around to verify the person arrived")
+                if not self.runtime.rotate_180():
+                    if self.runtime.stop_requested():
+                        return self._stop_result()
+                    return self._rotation_failed("Could not complete the goal lookback turn")
+                self.machine.transition(FollowEvent.ROTATION_COMPLETE)
+                self._state("Waiting for the person at the goal")
+                found = self.runtime.wait_for_person(
+                    "front",
+                    self.config.wait_timeout,
+                    require_foreground=False,
+                )
+                if self.runtime.stop_requested():
+                    return self._stop_result()
+                if not found:
+                    self.machine.transition(FollowEvent.HUMAN_TIMEOUT)
+                    message = "Goal reached, but no person was detected before the wait timeout"
+                    self._state(message)
+                    return FollowResult(False, "goal_human_timeout", message)
+                self.machine.transition(FollowEvent.HUMAN_FOUND)
+                message = "Goal reached and person confirmed"
+                self._state(message)
+                return FollowResult(True, "completed", message)
+
+            self.machine.transition(FollowEvent.LOOK_DUE)
+            self._state("Lookback interval expired; stopping Nav2")
+            if not self.runtime.cancel_navigation(navigation):
+                self.machine.transition(FollowEvent.NAVIGATION_FAILED)
+                message = "Nav2 did not confirm goal cancellation"
+                self._state(message)
+                return FollowResult(False, "navigation_cancel_failed", message)
+
+            self._state("Turning 180 degrees to check behind")
+            if not self.runtime.rotate_180():
+                if self.runtime.stop_requested():
+                    return self._stop_result()
+                return self._rotation_failed("Could not complete the periodic lookback turn")
+            self.machine.transition(FollowEvent.ROTATION_COMPLETE)
+
+            self._state("Waiting for the person behind the robot")
+            found = self.runtime.wait_for_person(
+                "front",
+                self.config.wait_timeout,
+                require_foreground=False,
+            )
+            if self.runtime.stop_requested():
+                return self._stop_result()
+            if not found:
+                self.machine.transition(FollowEvent.HUMAN_TIMEOUT)
+                message = "Person was not detected during the lookback wait"
+                self._state(message)
+                return FollowResult(False, "human_lost", message)
+
+            self.machine.transition(FollowEvent.HUMAN_FOUND)
+            self._state("Person confirmed; holding before the return turn")
+            if not self.runtime.hold_stopped(0.75):
+                return self._stop_result()
+            self._state("Person confirmed; turning back toward the goal")
+            if not self.runtime.rotate_180():
+                if self.runtime.stop_requested():
+                    return self._stop_result()
+                return self._rotation_failed("Could not complete the return-to-path turn")
+            self.machine.transition(FollowEvent.ROTATION_COMPLETE)
 
 
 # --- Screen Process Management ---
@@ -146,6 +379,31 @@ def print_status(socket_path: str):
                 active = "Busy" if res.get("active") else "Idle"
                 print(f"  State: {active}")
                 print(f"  Info : {res.get('status')}")
+                detection = res.get("detection") or {}
+                if detection.get("scan_fresh"):
+                    clearance = detection.get("visible_clearance_m")
+                    clearance_text = (
+                        "clear" if clearance is None else f"{clearance:.3f} m"
+                    )
+                    detected = "YES" if detection.get("presence_detected") else "no"
+                    print(f"  LiDAR visible-sector clearance: {clearance_text}")
+                    print(
+                        "  Presence <= "
+                        f"{detection.get('detect_range_m'):.3f} m: {detected}"
+                    )
+                else:
+                    print(
+                        "  LiDAR detection: unavailable "
+                        f"({detection.get('reason', 'unknown')})"
+                    )
+                turn = res.get("last_turn")
+                if turn:
+                    print(
+                        "  Last turn: requested "
+                        f"{turn.get('requested_deg')}deg, measured "
+                        f"{turn.get('measured_deg')}deg, error "
+                        f"{turn.get('error_deg')}deg ({turn.get('state')})"
+                    )
                 if res.get("error"):
                     print(f"  Last Error: {res.get('error')}")
             else:
@@ -191,11 +449,13 @@ class BrainNode:
         self.status_message = "Idle"
         self.error_message = ""
         self.success = False
+        self.command_lock = threading.Lock()
+        self.last_turn = None
 
     def get_logger(self):
         return self.node.get_logger()
 
-    def get_tf_pose(self, target_frame, source_frame='base_footprint'):
+    def get_tf_pose_sample(self, target_frame, source_frame='base_footprint'):
         try:
             import rclpy
             t = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
@@ -204,9 +464,14 @@ class BrainNode:
             siny_cosp = 2.0 * (ori.w * ori.z + ori.x * ori.y)
             cosy_cosp = 1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z)
             yaw = math.atan2(siny_cosp, cosy_cosp)
-            return (pos.x, pos.y, yaw)
+            stamp = (t.header.stamp.sec, t.header.stamp.nanosec)
+            return (pos.x, pos.y, yaw), stamp
         except Exception:
             return None
+
+    def get_tf_pose(self, target_frame, source_frame='base_footprint'):
+        sample = self.get_tf_pose_sample(target_frame, source_frame)
+        return None if sample is None else sample[0]
 
     def get_current_pose_best(self):
         pose = self.get_tf_pose('map', 'base_footprint')
@@ -261,6 +526,16 @@ class BrainNode:
                     min_dist = dist
         return min_dist
 
+    def check_front_proximity(
+        self,
+        target_distance: float,
+        cone_half_angle_deg: float = 30.0,
+    ):
+        """Return the shared LiDAR clearance and proximity decision."""
+
+        clearance = self.get_front_clearance(cone_half_angle_deg)
+        return clearance, clearance <= target_distance
+
     def get_rear_clearance(self, cone_half_angle_deg: float = 30.0) -> float:
         if self.latest_scan is None or (time.monotonic() - self.last_scan_time) > 1.0:
             return float('inf')
@@ -314,7 +589,7 @@ class BrainNode:
             min_k = -n // 2
             max_k = n // 2
             
-        # Determine whether to use a direct fine search (for small angles) or a coarse-to-fine search (for large angles)
+        # Determine whether to use a direct fine search or a coarse-to-fine search.
         search_range_size = max_k - min_k
         
         if search_range_size <= 60:
@@ -396,8 +671,36 @@ class BrainNode:
         from geometry_msgs.msg import Twist
         self.cmd_pub.publish(Twist())
 
+    def publish_zero_burst(self, count: int = 8, interval: float = 0.03):
+        for _ in range(count):
+            self.publish_zero()
+            time.sleep(interval)
+
+    def detection_snapshot(self, detect_range: float = 0.5):
+        if self.latest_scan is None:
+            return {"scan_fresh": False, "reason": "no_scan"}
+        scan_age = time.monotonic() - self.last_scan_time
+        if scan_age > 0.8:
+            return {
+                "scan_fresh": False,
+                "scan_age_seconds": round(scan_age, 3),
+                "reason": "stale_scan",
+            }
+        clearance = self.get_front_clearance(
+            cone_half_angle_deg=FollowMeConfig().sector_half_angle_deg
+        )
+        return {
+            "scan_fresh": True,
+            "scan_age_seconds": round(scan_age, 3),
+            "detect_range_m": detect_range,
+            "visible_clearance_m": (
+                None if clearance == float("inf") else round(clearance, 3)
+            ),
+            "presence_detected": clearance <= detect_range,
+        }
+
     def end_movement(self):
-        self.publish_zero()
+        self.publish_zero_burst()
         self.active_movement = None
         self.status_message = "Idle"
         self.movement_done.set()
@@ -408,7 +711,7 @@ class BrainNode:
             return
         now = time.monotonic()
         m = self.active_movement
-        if m['type'] == 'lead':
+        if m["type"] in ("follow_me", "navigate"):
             return
         if now >= m['deadline']:
             if m['type'] in ['hold', 'creep']:
@@ -428,8 +731,8 @@ class BrainNode:
             self.status_message = f"Holding: {m['deadline'] - now:.2f}s remaining"
             return
         if m['type'] == 'creep':
-            d = self.get_front_clearance()
             target_distance = m['target_distance']
+            d, target_reached = self.check_front_proximity(target_distance)
             
             if d == float('inf'):
                 if self.latest_scan is None or (time.monotonic() - self.last_scan_time) > 1.0:
@@ -442,7 +745,7 @@ class BrainNode:
                 error = d - target_distance
                 d_str = f"{d:.2f}m"
                 
-            if error > 0.02:
+            if not target_reached and error > 0.02:
                 speed = max(0.015, min(m['speed'], error * 0.4))
                 twist = Twist()
                 twist.linear.x = speed
@@ -515,7 +818,364 @@ class BrainNode:
             self.status_message = f"Rotating ({mode_str}): error={math.degrees(error):.1f}deg, speed={speed:.3f}rad/s"
 
 
-def execute_single_step(node: BrainNode, direction: str, amount, speed: float = None, duration: float = None, look_interval: float = None, detect_range: float = None) -> dict:
+class BrainFollowRuntime:
+    """ROS/Nav2 adapter used by the ROS-independent follow-me runner."""
+
+    def __init__(
+        self,
+        node: BrainNode,
+        config: FollowMeConfig,
+        rotation_steps=None,
+        destination_steps=None,
+    ):
+        from nav2_msgs.action import NavigateToPose
+        from rclpy.action import ActionClient
+
+        self.node = node
+        self.config = config
+        self.rotation_steps = list(rotation_steps or [
+            {"direction": "rotate_left", "amount": 180.0, "speed": 1.0},
+            {"direction": "stop", "amount": 1.0},
+        ])
+        self.destination_steps = list(destination_steps or [])
+        self.current_phase = "waiting_initial"
+        self.active_navigation = None
+        if not hasattr(node, "nav_client"):
+            node.nav_client = ActionClient(node.node, NavigateToPose, "navigate_to_pose")
+
+    def set_state(self, phase: str, message: str):
+        self.current_phase = phase
+        self.node.status_message = "Follow-me [%s]: %s" % (phase, message)
+        if isinstance(self.node.active_movement, dict):
+            self.node.active_movement["phase"] = phase
+            self.node.active_movement["detail"] = message
+
+    def stop_requested(self) -> bool:
+        return self.node.stop_requested
+
+    def hold_stopped(self, duration: float) -> bool:
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            if self.stop_requested():
+                self.node.publish_zero_burst()
+                return False
+            self.node.publish_zero()
+            time.sleep(0.05)
+        self.node.publish_zero_burst()
+        return True
+
+    def _fresh_scan(self):
+        if self.node.latest_scan is None:
+            return None
+        if time.monotonic() - self.node.last_scan_time > self.config.scan_max_age:
+            return None
+        return self.node.latest_scan
+
+    def wait_for_person(
+        self,
+        sector: str,
+        timeout: float,
+        require_foreground: bool,
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        last_sample_time = None
+
+        if require_foreground:
+            raise ValueError("Foreground-baseline detection is not supported")
+
+        consecutive = 0
+        last_sample_time = None
+        while time.monotonic() < deadline:
+            if self.stop_requested():
+                return False
+            if self._fresh_scan() is None:
+                consecutive = 0
+                remaining = max(0.0, deadline - time.monotonic())
+                self.set_state(
+                    self.current_phase,
+                    "Waiting for fresh LiDAR data (%.1fs remaining)" % remaining,
+                )
+                self.node.publish_zero()
+                time.sleep(0.05)
+                continue
+            if self.node.last_scan_time == last_sample_time:
+                time.sleep(0.02)
+                continue
+            last_sample_time = self.node.last_scan_time
+
+            clearance, person_present = self.node.check_front_proximity(
+                self.config.detect_range,
+                self.config.sector_half_angle_deg,
+            )
+            if person_present:
+                consecutive += 1
+                remaining = max(0.0, deadline - time.monotonic())
+                self.set_state(
+                    self.current_phase,
+                    (
+                        "Presence at %.2fm "
+                        "(confirming %d/%d, %.1fs remaining)"
+                    )
+                    % (
+                        clearance,
+                        consecutive,
+                        self.config.confirm_samples,
+                        remaining,
+                    ),
+                )
+                if consecutive >= self.config.confirm_samples:
+                    return True
+            else:
+                consecutive = 0
+                remaining = max(0.0, deadline - time.monotonic())
+                self.set_state(
+                    self.current_phase,
+                    "No presence within %.2fm (%.1fs remaining)"
+                    % (self.config.detect_range, remaining),
+                )
+            self.node.publish_zero()
+        return False
+
+    def start_navigation(self, goal):
+        from nav2_msgs.action import NavigateToPose
+
+        if not self.node.nav_client.wait_for_server(timeout_sec=3.0):
+            return None
+        x, y, yaw_deg = goal
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose.header.frame_id = "map"
+        goal_msg.pose.header.stamp = self.node.node.get_clock().now().to_msg()
+        goal_msg.pose.pose.position.x = x
+        goal_msg.pose.pose.position.y = y
+        yaw_rad = math.radians(yaw_deg)
+        goal_msg.pose.pose.orientation.z = math.sin(yaw_rad / 2.0)
+        goal_msg.pose.pose.orientation.w = math.cos(yaw_rad / 2.0)
+
+        future = self.node.nav_client.send_goal_async(goal_msg)
+        deadline = time.monotonic() + 5.0
+        while not future.done() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not future.done():
+            return None
+        handle = future.result()
+        if handle is None or not handle.accepted:
+            return None
+        navigation = {
+            "handle": handle,
+            "result": handle.get_result_async(),
+        }
+        self.active_navigation = navigation
+        if self.stop_requested():
+            self.cancel_navigation(navigation)
+            return None
+        return navigation
+
+    def wait_for_navigation(self, navigation, look_interval: float):
+        from action_msgs.msg import GoalStatus
+
+        deadline = time.monotonic() + look_interval
+        result_future = navigation["result"]
+        while True:
+            if self.stop_requested():
+                return FollowEvent.STOP_REQUESTED, "Follow-me stopped by operator"
+            if result_future.done():
+                result = result_future.result()
+                self.active_navigation = None
+                if result.status == GoalStatus.STATUS_SUCCEEDED:
+                    self.node.publish_zero_burst()
+                    return FollowEvent.GOAL_REACHED, "Navigation goal reached"
+                return (
+                    FollowEvent.NAVIGATION_FAILED,
+                    "Nav2 finished with status code %s" % result.status,
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return FollowEvent.LOOK_DUE, "Lookback interval expired"
+            self.set_state(
+                self.current_phase,
+                "Navigating; next person check in %.1fs" % remaining,
+            )
+            time.sleep(0.1)
+
+    def cancel_navigation(self, navigation) -> bool:
+        from action_msgs.msg import GoalStatus
+
+        accepted = False
+        for _ in range(2):
+            cancel_future = navigation["handle"].cancel_goal_async()
+            deadline = time.monotonic() + 3.0
+            while not cancel_future.done() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            if cancel_future.done():
+                response = cancel_future.result()
+                accepted = bool(response and response.goals_canceling)
+                if accepted:
+                    break
+
+        result_future = navigation["result"]
+        result_deadline = time.monotonic() + 3.0
+        while not result_future.done() and time.monotonic() < result_deadline:
+            time.sleep(0.02)
+        if result_future.done():
+            accepted = accepted or result_future.result().status == GoalStatus.STATUS_CANCELED
+        if accepted:
+            self.active_navigation = None
+        self.node.publish_zero_burst()
+        return accepted
+
+    def shutdown(self):
+        if self.active_navigation is not None:
+            try:
+                self.cancel_navigation(self.active_navigation)
+            except Exception:
+                pass
+        self.node.publish_zero_burst()
+
+    def _run_recipe(self, steps, detail: str) -> bool:
+        for step in steps:
+            if self.stop_requested():
+                return False
+            self.set_state(self.current_phase, detail)
+            options = {}
+            if step.get("speed") is not None:
+                options["speed"] = step["speed"]
+            if step.get("duration") is not None:
+                options["duration"] = step["duration"]
+            result = execute_single_step(
+                self.node,
+                step.get("direction"),
+                step.get("amount"),
+                **options,
+            )
+            was_stopped = self.node.stop_requested
+            self.node.active_movement = {
+                "type": "follow_me",
+                "phase": self.current_phase,
+                "detail": "",
+                "detect_range": self.config.detect_range,
+            }
+            if was_stopped:
+                self.node.stop_requested = True
+            if not result.get("ok"):
+                return False
+        return True
+
+    def rotate_180(self) -> bool:
+        """Run the rotate_180() recipe supplied by movements.py."""
+
+        completed = self._run_recipe(
+            self.rotation_steps,
+            "Running rotate_180() movement recipe",
+        )
+        self.node.last_turn = {
+            "requested_deg": 180.0,
+            "measured_deg": None,
+            "error_deg": None,
+            "feedback": "rotate_180() movement recipe",
+            "state": "completed" if completed else "failed",
+        }
+        return completed
+
+    def complete_destination(self) -> bool:
+        """Run the steps after navigate in move_to_point()."""
+
+        return self._run_recipe(
+            self.destination_steps[1:],
+            "Finishing move_to_point() movement recipe",
+        )
+
+
+def execute_follow_me(
+    node: BrainNode,
+    amount,
+    speed: float = None,
+    look_interval: float = None,
+    detect_range: float = None,
+    wait_timeout: float = None,
+    rotation_steps=None,
+    destination_steps=None,
+) -> dict:
+    destination_steps = list(destination_steps or [
+        {"direction": "navigate", "amount": amount},
+    ])
+    if not destination_steps or destination_steps[0].get("direction") != "navigate":
+        return {
+            "ok": False,
+            "message": "move_to_point() must begin with a navigate step",
+        }
+    amount = destination_steps[0].get("amount")
+    if not isinstance(amount, list) or len(amount) < 2:
+        return {
+            "ok": False,
+            "message": "move_to_point() navigate amount must be [x, y, yaw]",
+        }
+    x = float(amount[0])
+    y = float(amount[1])
+    yaw_deg = float(amount[2]) if len(amount) > 2 else 0.0
+    config = FollowMeConfig(
+        look_interval=look_interval if look_interval is not None else 20.0,
+        detect_range=detect_range if detect_range is not None else 0.5,
+        wait_timeout=wait_timeout if wait_timeout is not None else 15.0,
+    )
+    try:
+        config.validate()
+    except ValueError as error:
+        return {"ok": False, "message": str(error)}
+
+    node.movement_done.clear()
+    node.stop_requested = False
+    node.error_message = ""
+    node.success = False
+    node.active_movement = {
+        "type": "follow_me",
+        "phase": "waiting_initial",
+        "target_pose": [x, y, yaw_deg],
+        "detail": "",
+        "detect_range": config.detect_range,
+    }
+    runtime = None
+    try:
+        runtime = BrainFollowRuntime(
+            node,
+            config,
+            rotation_steps=rotation_steps,
+            destination_steps=destination_steps,
+        )
+        result = FollowMeRunner(runtime, (x, y, yaw_deg), config).run()
+        node.success = result.ok
+        if not result.ok:
+            node.error_message = result.message
+        return {"ok": result.ok, "message": result.message, "reason": result.reason}
+    except Exception as error:
+        node.error_message = "%s: %s" % (type(error).__name__, error)
+        return {
+            "ok": False,
+            "message": "Follow-me controller failed: %s" % node.error_message,
+            "reason": "unhandled_exception",
+        }
+    finally:
+        if runtime is not None:
+            runtime.shutdown()
+        else:
+            node.publish_zero_burst()
+        node.active_movement = None
+        node.movement_done.set()
+        if node.success:
+            node.status_message = "Follow-me completed"
+
+
+def execute_single_step(
+    node: BrainNode,
+    direction: str,
+    amount,
+    speed: float = None,
+    duration: float = None,
+    look_interval: float = None,
+    detect_range: float = None,
+    wait_timeout: float = None,
+    rotation_steps=None,
+    destination_steps=None,
+) -> dict:
     if direction in ["navigate", "lead"]:
         if not isinstance(amount, list) or len(amount) < 2:
             return {"ok": False, "message": f"{direction.capitalize()} amount must be a list: [x, y] or [x, y, yaw]"}
@@ -629,252 +1289,62 @@ def execute_single_step(node: BrainNode, direction: str, amount, speed: float = 
         else:
             return {"ok": False, "message": node.error_message}
     elif direction == "navigate":
-        from nav2_msgs.action import NavigateToPose
-        from rclpy.action import ActionClient
-        
-        x = float(amount[0])
-        y = float(amount[1])
-        yaw_deg = float(amount[2]) if len(amount) > 2 else 0.0
-        
-        if not hasattr(node, 'nav_client'):
-            node.nav_client = ActionClient(node.node, NavigateToPose, 'navigate_to_pose')
-            
-        if not node.nav_client.wait_for_server(timeout_sec=3.0):
-            return {"ok": False, "message": "NavigateToPose action server not available. Ensure map_2d_load is running."}
-            
-        goal_msg = NavigateToPose.Goal()
-        goal_msg.pose.header.frame_id = 'map'
-        goal_msg.pose.header.stamp = node.node.get_clock().now().to_msg()
-        goal_msg.pose.pose.position.x = x
-        goal_msg.pose.pose.position.y = y
-        
-        yaw_rad = math.radians(yaw_deg)
-        goal_msg.pose.pose.orientation.z = math.sin(yaw_rad / 2.0)
-        goal_msg.pose.pose.orientation.w = math.cos(yaw_rad / 2.0)
-        
-        node.status_message = f"Navigating to x={x:.2f}, y={y:.2f}, yaw={yaw_deg:.1f}°"
-        
-        send_goal_future = node.nav_client.send_goal_async(goal_msg)
-        while not send_goal_future.done():
-            time.sleep(0.01)
-            
-        goal_handle = send_goal_future.result()
-        if not goal_handle.accepted:
-            return {"ok": False, "message": "Navigation goal rejected by Nav2 planner"}
-            
-        get_result_future = goal_handle.get_result_async()
-        while not get_result_future.done():
-            time.sleep(0.05)
-            
-        status = get_result_future.result().status
-        if status == 4: # GoalStatus.STATUS_SUCCEEDED
-            return {"ok": True, "message": "Navigation completed"}
-        else:
-            return {"ok": False, "message": f"Navigation failed with status code {status}"}
-    elif direction == "lead":
-        from nav2_msgs.action import NavigateToPose
-        from rclpy.action import ActionClient
-        from geometry_msgs.msg import Twist
+        from action_msgs.msg import GoalStatus
 
         x = float(amount[0])
         y = float(amount[1])
         yaw_deg = float(amount[2]) if len(amount) > 2 else 0.0
-        
-        max_speed = speed if speed is not None else 0.4
-        if max_speed <= 0:
-            return {"ok": False, "message": "Speed must be positive"}
 
-        if not hasattr(node, 'nav_client'):
-            node.nav_client = ActionClient(node.node, NavigateToPose, 'navigate_to_pose')
-
-        if not node.nav_client.wait_for_server(timeout_sec=3.0):
-            return {"ok": False, "message": "NavigateToPose action server not available. Ensure map_2d_load is running."}
-
-        node.movement_done.clear()
         node.stop_requested = False
         node.error_message = ""
-        node.success = False
         node.active_movement = {
-            "type": "lead",
-            "target_pose": [x, y, yaw_deg]
+            "type": "navigate",
+            "phase": "navigating",
+            "target_pose": [x, y, yaw_deg],
         }
+        runtime = BrainFollowRuntime(node, FollowMeConfig())
+        try:
+            navigation = runtime.start_navigation((x, y, yaw_deg))
+            if navigation is None:
+                if node.stop_requested:
+                    return {"ok": False, "message": "Navigation stopped by operator"}
+                return {
+                    "ok": False,
+                    "message": "NavigateToPose action server unavailable or goal rejected",
+                }
 
-        def send_goal(gx, gy, gyaw):
-            goal_msg = NavigateToPose.Goal()
-            goal_msg.pose.header.frame_id = 'map'
-            goal_msg.pose.header.stamp = node.node.get_clock().now().to_msg()
-            goal_msg.pose.pose.position.x = gx
-            goal_msg.pose.pose.position.y = gy
-            yaw_rad = math.radians(gyaw)
-            goal_msg.pose.pose.orientation.z = math.sin(yaw_rad / 2.0)
-            goal_msg.pose.pose.orientation.w = math.cos(yaw_rad / 2.0)
-            return node.nav_client.send_goal_async(goal_msg)
+            node.status_message = (
+                f"Navigating to x={x:.2f}, y={y:.2f}, yaw={yaw_deg:.1f}deg"
+            )
+            result_future = navigation["result"]
+            while not result_future.done():
+                if node.stop_requested:
+                    runtime.cancel_navigation(navigation)
+                    return {"ok": False, "message": "Navigation stopped by operator"}
+                time.sleep(0.05)
 
-        def run_sub_step(sub_dir, sub_amt, sub_spd=None):
-            res = execute_single_step(node, sub_dir, sub_amt, sub_spd)
-            node.active_movement = {
-                "type": "lead",
-                "target_pose": [x, y, yaw_deg]
+            status = result_future.result().status
+            runtime.active_navigation = None
+            if status == GoalStatus.STATUS_SUCCEEDED:
+                return {"ok": True, "message": "Navigation completed"}
+            return {
+                "ok": False,
+                "message": "Navigation failed with status code %s" % status,
             }
-            return res
-
-        def rotate_relative(angle_deg, rotate_speed=0.4):
-            if node.latest_scan is None:
-                direction = "rotate_left" if angle_deg > 0 else "rotate_right"
-                run_sub_step(direction, abs(angle_deg), rotate_speed)
-                return True
-                
-            start_ranges = list(node.latest_scan.ranges)
-            target_rad = math.radians(abs(angle_deg))
-            sign = 1.0 if angle_deg > 0 else -1.0
-            
-            rate = 0.05
-            timeout = time.monotonic() + 10.0
-            while time.monotonic() < timeout:
-                if node.stop_requested:
-                    return False
-                    
-                yaw_change = node.get_lidar_yaw_change(start_ranges, max_angle_rad=target_rad)
-                rotated = sign * yaw_change
-                error = target_rad - rotated
-                
-                if error <= math.radians(2.5):
-                    break
-                    
-                cmd_speed = max(0.12, min(rotate_speed, error * 1.8))
-                twist = Twist()
-                twist.angular.z = sign * cmd_speed
-                node.cmd_pub.publish(twist)
-                time.sleep(rate)
-                
-            node.publish_zero()
-            return True
-
-        if node.current_pose is None:
-            timeout_feedback = time.monotonic() + 2.0
-            while node.current_pose is None:
-                if time.monotonic() > timeout_feedback:
-                    node.active_movement = None
-                    return {"ok": False, "message": "No odometry feedback from robot"}
-                time.sleep(0.01)
-
-        detect_val = detect_range if detect_range is not None else 1.5
-        look_val = look_interval if look_interval is not None else 8.0
-
-        node.status_message = "Lead: turning 180° to find human before starting..."
-        rotate_relative(180, rotate_speed=max_speed)
-
-        node.status_message = "Lead: waiting for human to stand in front..."
-        human_ready = False
-        while not human_ready:
-            if node.stop_requested:
-                node.active_movement = None
-                return {"ok": False, "message": "Lead goal stopped before starting"}
-            
-            clearance = node.get_front_clearance(cone_half_angle_deg=90.0)
-            if clearance <= detect_val:
-                human_ready = True
-                node.status_message = f"Lead: human detected at {clearance:.2f}m! Starting..."
-                time.sleep(1.0)
-                break
-                
-            if clearance == float('inf'):
-                node.status_message = f"Lead: waiting for human (no one in sight, target <= {detect_val:.2f}m)"
-            else:
-                node.status_message = f"Lead: waiting for human (closest is {clearance:.2f}m, target <= {detect_val:.2f}m)"
-            
-            node.publish_zero()
-            time.sleep(0.1)
-
-        node.status_message = "Lead: turning back to path..."
-        rotate_relative(-180, rotate_speed=max_speed)
-
-        node.status_message = f"Lead: starting navigation to x={x:.2f}, y={y:.2f}"
-        
-        outer_success = False
-        goal_handle = None
-        
-        send_goal_future = send_goal(x, y, yaw_deg)
-        while not send_goal_future.done():
-            if node.stop_requested:
-                break
-            time.sleep(0.01)
-            
-        if not node.stop_requested:
-            goal_handle = send_goal_future.result()
-            
-        if goal_handle is None or not goal_handle.accepted:
+        finally:
+            runtime.shutdown()
             node.active_movement = None
-            return {"ok": False, "message": "Lead goal rejected by Nav2 planner"}
-
-        get_result_future = goal_handle.get_result_async()
-        last_look_time = time.monotonic()
-        
-        while not get_result_future.done():
-            if node.stop_requested:
-                goal_handle.cancel_goal_async()
-                break
-                
-            if time.monotonic() - last_look_time > look_val:
-                node.status_message = "Lead: pausing to look back..."
-                cancel_future = goal_handle.cancel_goal_async()
-                while not cancel_future.done():
-                    time.sleep(0.01)
-                
-                node.publish_zero()
-                time.sleep(0.5)
-                
-                node.status_message = "Lead: turning 180° to find human..."
-                rotate_relative(180, rotate_speed=max_speed)
-                
-                human_present = False
-                while not human_present:
-                    if node.stop_requested:
-                        break
-                    clearance = node.get_front_clearance(cone_half_angle_deg=90.0)
-                    if clearance <= detect_val:
-                        human_present = True
-                        node.status_message = f"Lead: human detected at {clearance:.2f}m!"
-                        time.sleep(1.0)
-                        break
-                    
-                    if clearance == float('inf'):
-                        node.status_message = f"Lead: waiting for human (no one in sight, target <= {detect_val:.2f}m)"
-                    else:
-                        node.status_message = f"Lead: waiting for human (closest is {clearance:.2f}m, target <= {detect_val:.2f}m)"
-                    
-                    node.publish_zero()
-                    time.sleep(0.1)
-                
-                node.status_message = "Lead: turning back to path..."
-                rotate_relative(-180, rotate_speed=max_speed)
-                
-                if node.stop_requested:
-                    break
-                    
-                node.status_message = "Lead: resuming path navigation..."
-                send_goal_future = send_goal(x, y, yaw_deg)
-                while not send_goal_future.done():
-                    time.sleep(0.01)
-                goal_handle = send_goal_future.result()
-                if not goal_handle.accepted:
-                    node.active_movement = None
-                    return {"ok": False, "message": "Lead goal resumption failed"}
-                get_result_future = goal_handle.get_result_async()
-                last_look_time = time.monotonic()
-                
-            time.sleep(0.1)
-            
-        if not node.stop_requested and get_result_future.done():
-            status = get_result_future.result().status
-            if status == 4:
-                outer_success = True
-                
-        node.active_movement = None
-        if outer_success:
-            return {"ok": True, "message": "Guided navigation completed successfully"}
-        else:
-            return {"ok": False, "message": "Guided navigation failed or stopped"}
+    elif direction == "lead":
+        return execute_follow_me(
+            node,
+            amount,
+            speed=speed,
+            look_interval=look_interval,
+            detect_range=detect_range,
+            wait_timeout=wait_timeout,
+            rotation_steps=rotation_steps,
+            destination_steps=destination_steps,
+        )
     else:
         return {"ok": False, "message": f"Unknown direction '{direction}'"}
 
@@ -883,46 +1353,82 @@ def handle_request(node: BrainNode, request: dict) -> dict:
     command = request.get("command")
     if command == "status":
         active = node.active_movement is not None
+        movement = node.active_movement if isinstance(node.active_movement, dict) else {}
+        detect_range = movement.get("detect_range", 0.5)
         return {
             "ok": True,
             "active": active,
             "status": node.status_message,
-            "error": node.error_message
+            "phase": movement.get("phase"),
+            "target_pose": movement.get("target_pose"),
+            "detection": node.detection_snapshot(detect_range),
+            "last_turn": node.last_turn,
+            "error": node.error_message,
         }
     elif command == "stop":
         if node.active_movement is not None:
             node.stop_requested = True
             return {"ok": True, "message": "Stop command sent"}
         else:
-            node.publish_zero()
+            node.publish_zero_burst()
             return {"ok": True, "message": "Already idle"}
     elif command == "move":
-        if node.active_movement is not None:
+        if not node.command_lock.acquire(blocking=False):
             return {"ok": False, "message": "Robot is busy"}
-        direction = request.get("direction")
-        amount = request.get("amount")
-        speed = request.get("speed")
-        duration = request.get("duration")
-        look_interval = request.get("look_interval")
-        detect_range = request.get("detect_range")
-        return execute_single_step(node, direction, amount, speed, duration, look_interval, detect_range)
+        try:
+            direction = request.get("direction")
+            amount = request.get("amount")
+            speed = request.get("speed")
+            duration = request.get("duration")
+            look_interval = request.get("look_interval")
+            detect_range = request.get("detect_range")
+            wait_timeout = request.get("wait_timeout", request.get("deadtime"))
+            return execute_single_step(
+                node,
+                direction,
+                amount,
+                speed,
+                duration,
+                look_interval,
+                detect_range,
+                wait_timeout,
+                request.get("rotation_steps"),
+                request.get("destination_steps"),
+            )
+        finally:
+            node.command_lock.release()
     elif command == "sequence":
-        if node.active_movement is not None:
+        if not node.command_lock.acquire(blocking=False):
             return {"ok": False, "message": "Robot is busy"}
-        steps = request.get("steps")
-        if not isinstance(steps, list):
-            return {"ok": False, "message": "Steps must be a list"}
-        for i, step in enumerate(steps):
-            direction = step.get("direction")
-            amount = step.get("amount")
-            speed = step.get("speed")
-            duration = step.get("duration")
-            look_interval = step.get("look_interval")
-            detect_range = step.get("detect_range")
-            res = execute_single_step(node, direction, amount, speed, duration, look_interval, detect_range)
-            if not res["ok"]:
-                return {"ok": False, "message": f"Step {i+1} failed: {res['message']}"}
-        return {"ok": True, "message": f"Sequence of {len(steps)} steps completed successfully"}
+        try:
+            steps = request.get("steps")
+            if not isinstance(steps, list):
+                return {"ok": False, "message": "Steps must be a list"}
+            for i, step in enumerate(steps):
+                direction = step.get("direction")
+                amount = step.get("amount")
+                speed = step.get("speed")
+                duration = step.get("duration")
+                look_interval = step.get("look_interval")
+                detect_range = step.get("detect_range")
+                wait_timeout = step.get("wait_timeout", step.get("deadtime"))
+                res = execute_single_step(
+                    node,
+                    direction,
+                    amount,
+                    speed,
+                    duration,
+                    look_interval,
+                    detect_range,
+                    wait_timeout,
+                    step.get("rotation_steps"),
+                    step.get("destination_steps"),
+                )
+                if not res["ok"]:
+                    return {"ok": False, "message": f"Step {i+1} failed: {res['message']}"}
+            return {"ok": True, "message": f"Sequence of {len(steps)} steps completed successfully"}
+        finally:
+            node.command_lock.release()
     else:
         return {"ok": False, "message": f"Unknown command '{command}'"}
 

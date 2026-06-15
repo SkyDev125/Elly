@@ -138,7 +138,7 @@ case "${1:-help}" in
     fi
     rm -f "$MOTION_SOCKET"
     if [ ! -f "$MOTION_DIR/brain.py" ]; then
-      echo "[x] Persistent movement service is not deployed. Run scripts/deploy_robot.sh from the laptop."
+      echo "[x] Persistent movement service is not deployed. Run scripts/setup.sh from the laptop."
       exit 1
     fi
     screen -dmS motion_service bash -lc \

@@ -43,29 +43,33 @@ def high(clearance=0.40):
         {"direction": "stop", "amount": 1},
     ]
 
-
-def navigate_to_point():
-    """Navigate to a coordinate [x, y, yaw_deg] and perform a quick search scan.
-    
-    Example: elly_move navigate_and_scan 1.2 -0.5 90
-    """
+def rotate_180():
     return [
-        # Look at the human's location
-        
-        # Human Location:
-        # {"direction": "navigate", "amount": [-2.4, -1.4, 190]},
-        
-        # In front of human
-        #{"direction": "navigate", "amount": [-1.6, -1.1, 190]},
-
-        # Get in front of human's path (Broadside)
-        #{"direction": "navigate", "amount": [0, 0, 120]},
-
-        # Get behind Human
-        {"direction": "navigate", "amount": [-3.2, -1.7, 30]},
-
+        {"direction": "rotate_left", "amount": 150, "speed": 1.0},
         {"direction": "stop", "amount": 1},
     ]
+
+def move_to_point(x=-3.2, y=-1.7, yaw_deg=30):
+    """Navigate to an exact map coordinate and stop."""
+    return [
+        {"direction": "navigate", "amount": [x, y, yaw_deg]},
+        {"direction": "stop", "amount": 1},
+    ]
+
+
+def navigate_to_point():
+    """Backward-compatible name for the original fixed destination."""
+    return move_to_point()
+
+
+def move_behind_human(x=-3.2, y=-1.7, yaw_deg=30):
+    """Backward-compatible descriptive name."""
+    return move_to_point(x, y, yaw_deg)
+
+
+def move_to_behind_human_point():
+    """Backward-compatible name for the original fixed destination."""
+    return move_behind_human()
 
 
 def creep_in(target_distance=0.5, speed=0.05, duration=30.0):
@@ -85,25 +89,44 @@ def creep_in(target_distance=0.5, speed=0.05, duration=30.0):
     ]
 
 
-def follow_me(x, y, yaw_deg=0.0, speed=0.4, look_interval=8.0, detect_range=1.5):
-    """Guided navigation: path to [x, y, yaw_deg], stopping to look back for the human every look_interval seconds.
-    
-    If the human falls behind (further than detect_range), the robot waits until they catch up before resuming.
-    
-    Example: elly_move follow_me 1.5 -0.5 90 0.4 6.0 1.2
+def follow_me(
+    x=-3.2,
+    y=-1.7,
+    yaw_deg=30,
+    turn_speed=1.0,
+    look_interval=20.0,
+    detect_range=0.5,
+    wait_timeout=15.0,
+):
+    """Lead a person to a Nav2 goal with periodic LiDAR lookbacks.
+
+    The person enters the rear detection zone to start. Every look_interval
+    seconds, Nav2 is cancelled, the robot turns 180 degrees, and waits up to
+    wait_timeout seconds. The final goal uses the same timed person check.
+
+    turn_speed is retained for command compatibility. Follow-me deliberately
+    uses the proven rotate_180() routine at speed 1.0. Nav2 path speed is
+    configured in config/myagv_nav2.yaml.
+
+    Example: elly_move follow_me 1.5 -0.5 90 0.4 20 0.5 15
     """
+    destination_steps = move_to_point(x, y, yaw_deg)
     return [
         {
             "direction": "lead",
-            "amount": [x, y, yaw_deg],
-            "speed": speed,
+            "amount": destination_steps[0]["amount"],
+            "speed": turn_speed,
             "look_interval": look_interval,
-            "detect_range": detect_range
+            "detect_range": detect_range,
+            "wait_timeout": wait_timeout,
+            "rotation_steps": rotate_180(),
+            "destination_steps": destination_steps,
         }
     ]
 
-def temp() :
-    return follow_me(-3.2, -1.7, 190, 0.4, 12.0, 0.5)
+
+def temp():
+    return follow_me(-3.2, -1.7, 190, 0.4, 30, 0.5, 15.0)
 
 def stop():
     """Stop and hold position for 5 seconds."""

@@ -22,11 +22,8 @@ The setup script:
 - Builds the local robot-description package (`myagv_description`).
 - Appends the Elly console commands and aliases to your laptop's `~/.bashrc`.
 
-After changing Jetson-side scripts, redeploy without repeating the full setup:
-
-```bash
-elly_redeploy
-```
+All Jetson movement and follow-me controller logic lives in `scripts/brain.py`;
+movement recipes remain in `sequences/movements.py`.
 
 ---
 
@@ -116,6 +113,40 @@ elly_move sequence dance.json
 - `elly_move_stop`: Immediately aborts any running movement/sequence and stops the robot.
 - `robot_status`: Lists active `screen` sessions running on the Jetson.
 - `robot_peek <session_name>`: Attach to a screen session console (e.g. `robot_peek motion_service`). Detach with `Ctrl+A`, then `D`.
+
+---
+
+## Follow-Me
+
+`follow_me` leads a person to a Nav2 map goal:
+
+```bash
+elly_move follow_me X Y YAW_DEG TURN_SPEED LOOK_INTERVAL DETECT_RANGE WAIT_TIMEOUT
+```
+
+Example:
+
+```bash
+elly_move follow_me -3.2 -1.7 190 0.4 20 0.5 15
+```
+
+Behavior:
+
+1. The robot remains stopped and watches the LiDAR sector exposed by the body.
+2. A presence within `DETECT_RANGE` for three consecutive scans starts navigation.
+3. After each `LOOK_INTERVAL`, Nav2 is cancelled and the robot runs the fixed `rotate_180()` movement.
+4. The robot waits up to `WAIT_TIMEOUT` for a persistent presence inside the visible LiDAR sector. If found, it turns another 180 degrees and resumes the goal with a fresh interval.
+5. At the goal it turns 180 degrees and performs the same timed check. Success leaves the robot facing the person.
+
+`follow_me()` is an orchestration of existing movement recipes:
+
+- Every lookback calls `rotate_180()`: `rotate_left 180` at speed `1.0`, followed by `stop 1`.
+- Its destination comes from `move_to_point(X, Y, YAW)`, including that recipe's final stop.
+- Human detection is follow-me logic. It shares only the neutral visible-sector LiDAR clearance helper also used by `creep_in()`; it does not call or depend on the `creep_in()` movement.
+
+`TURN_SPEED` remains accepted for compatibility but is not used. Nav2 path speed is configured in `config/myagv_nav2.yaml`. LiDAR cannot distinguish a person from furniture, so keep the visible detection sector clear.
+
+Follow-me requires `lidar_on`, a loaded 2D map/Nav2 session, AMCL localization, and `motion_on`.
 
 ---
 
