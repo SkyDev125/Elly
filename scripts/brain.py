@@ -52,6 +52,11 @@ LINEAR_DIRECTIONS = {
     "right": (0.0, -1.0),
 }
 
+TURN_DIRECTIONS = {
+    "turn_left": 1.0,
+    "turn_right": -1.0,
+}
+
 ANGULAR_DIRECTIONS = {
     "rotate_left": 1.0,
     "left_turn": 1.0,
@@ -676,6 +681,96 @@ class BrainNode:
             self.publish_zero()
             time.sleep(interval)
 
+    def _pose_log(self, pose):
+        if pose is None:
+            return None
+        return {
+            "x": round(pose[0], 4),
+            "y": round(pose[1], 4),
+            "yaw_deg": round(math.degrees(pose[2]), 2),
+        }
+
+    def pose_diagnostics_snapshot(self):
+        snapshot = {}
+        for frame in ("map", "odom"):
+            pose = self.get_tf_pose(frame, 'base_footprint')
+            if pose is not None:
+                snapshot[frame] = self._pose_log(pose)
+        if self.current_pose is not None:
+            snapshot["odom_sub"] = self._pose_log(self.current_pose)
+        return snapshot
+
+    def pose_diagnostics_delta(self, start, end):
+        delta = {}
+        for frame, start_pose in start.items():
+            end_pose = end.get(frame)
+            if not end_pose:
+                continue
+            dx = end_pose["x"] - start_pose["x"]
+            dy = end_pose["y"] - start_pose["y"]
+            yaw_delta = normalize_angle(
+                math.radians(end_pose["yaw_deg"] - start_pose["yaw_deg"])
+            )
+            delta[frame] = {
+                "dx_m": round(dx, 4),
+                "dy_m": round(dy, 4),
+                "closure_error_m": round(math.hypot(dx, dy), 4),
+                "wrapped_yaw_delta_deg": round(math.degrees(yaw_delta), 2),
+            }
+        return delta
+
+    def record_turn_sample(self, movement, now, pose, rotated, error, frame):
+        last_sample = movement.get("last_sample_at", 0.0)
+        if now - last_sample < 0.25:
+            return
+        sample = {
+            "t_s": round(now - movement.get("turn_start_monotonic", now), 3),
+            "frame": frame,
+            "measured_deg": round(math.degrees(rotated), 2),
+            "error_deg": round(math.degrees(error), 2),
+            "pose": self._pose_log(pose),
+        }
+        movement.setdefault("turn_samples", []).append(sample)
+        if len(movement["turn_samples"]) > 120:
+            movement["turn_samples"] = movement["turn_samples"][-120:]
+        movement["last_sample_at"] = now
+
+        last_log = movement.get("last_ros_log_at", 0.0)
+        if now - last_log >= 1.0:
+            self.get_logger().info("turn_progress " + json.dumps(sample, sort_keys=True))
+            movement["last_ros_log_at"] = now
+
+    def finish_turn_diagnostics(self, movement, state, reason):
+        end_snapshot = self.pose_diagnostics_snapshot()
+        measured_deg = round(math.degrees(movement.get("turn_progress_rad", 0.0)), 2)
+        requested_deg = round(math.degrees(movement.get("target_angle_rad", 0.0)), 2)
+        report = {
+            "state": state,
+            "reason": reason,
+            "direction": "turn_left" if movement.get("sign", 1.0) > 0 else "turn_right",
+            "feedback": movement.get("feedback_frame"),
+            "requested_deg": requested_deg,
+            "measured_deg": measured_deg,
+            "error_deg": round(requested_deg - measured_deg, 2),
+            "radius_m": round(movement.get("radius", 0.0), 4),
+            "speed_mps": round(movement.get("speed", 0.0), 4),
+            "angular_speed_radps": round(movement.get("angular_speed", 0.0), 4),
+            "finish_tolerance_deg": round(
+                math.degrees(movement.get("finish_tolerance_rad", 0.0)),
+                2,
+            ),
+            "start_pose": movement.get("pose_start", {}),
+            "end_pose": end_snapshot,
+            "pose_delta": self.pose_diagnostics_delta(
+                movement.get("pose_start", {}),
+                end_snapshot,
+            ),
+            "samples": movement.get("turn_samples", [])[-80:],
+        }
+        self.last_turn = report
+        self.get_logger().info("turn_diagnostics " + json.dumps(report, sort_keys=True))
+        return report
+
     def detection_snapshot(self, detect_range: float = 0.5):
         if self.latest_scan is None:
             return {"scan_fresh": False, "reason": "no_scan"}
@@ -729,6 +824,56 @@ class BrainNode:
         if m['type'] == 'hold':
             self.publish_zero()
             self.status_message = f"Holding: {m['deadline'] - now:.2f}s remaining"
+            return
+        if m['type'] == 'turn':
+            sign = m['sign']
+            target = m['target_angle_rad']
+            rotated = m.get('turn_progress_rad', 0.0)
+            mode_str = "waiting"
+
+            frame = m.get('feedback_frame', 'odom_sub')
+            if frame == 'odom_sub':
+                pose = self.current_pose
+            else:
+                pose = self.get_tf_pose(frame, 'base_footprint')
+
+            if pose is not None:
+                yaw = pose[2]
+                if m.get('turn_prev_yaw') is None:
+                    m['turn_prev_yaw'] = yaw
+                    m['turn_unwrapped_yaw'] = yaw
+                    m['turn_start_yaw'] = yaw
+                else:
+                    unwrapped = unwrap_angle(
+                        m['turn_prev_yaw'],
+                        yaw,
+                        m['turn_unwrapped_yaw'],
+                    )
+                    m['turn_prev_yaw'] = yaw
+                    m['turn_unwrapped_yaw'] = unwrapped
+                    rotated = max(0.0, sign * (unwrapped - m['turn_start_yaw']))
+                    m['turn_progress_rad'] = rotated
+                mode_str = frame
+
+            error = target - rotated
+            if error <= m.get('finish_tolerance_rad', math.radians(8.0)):
+                self.success = True
+                self.publish_zero_burst(count=16, interval=0.015)
+                self.end_movement()
+                return
+
+            linear_speed = m['speed']
+            angular_speed = m['angular_speed']
+            twist = Twist()
+            twist.linear.x = linear_speed
+            twist.angular.z = sign * angular_speed
+            self.cmd_pub.publish(twist)
+            direction = "left" if sign > 0 else "right"
+            self.status_message = (
+                f"Turning {direction} ({mode_str}): "
+                f"error={math.degrees(error):.1f}deg, "
+                f"linear={linear_speed:.3f}m/s, angular={angular_speed:.3f}rad/s"
+            )
             return
         if m['type'] == 'creep':
             target_distance = m['target_distance']
@@ -1041,6 +1186,10 @@ class BrainFollowRuntime:
                 options["speed"] = step["speed"]
             if step.get("duration") is not None:
                 options["duration"] = step["duration"]
+            if step.get("radius") is not None:
+                options["radius"] = step["radius"]
+            if step.get("finish_tolerance") is not None:
+                options["finish_tolerance"] = step["finish_tolerance"]
             result = execute_single_step(
                 self.node,
                 step.get("direction"),
@@ -1175,6 +1324,8 @@ def execute_single_step(
     wait_timeout: float = None,
     rotation_steps=None,
     destination_steps=None,
+    radius: float = None,
+    finish_tolerance: float = None,
 ) -> dict:
     if direction in ["navigate", "lead"]:
         if not isinstance(amount, list) or len(amount) < 2:
@@ -1214,6 +1365,56 @@ def execute_single_step(
         node.movement_done.wait()
         if node.success:
             return {"ok": True, "message": "Movement completed"}
+        else:
+            return {"ok": False, "message": node.error_message}
+    elif direction in TURN_DIRECTIONS:
+        sign = TURN_DIRECTIONS[direction]
+        max_speed = speed if speed is not None else 0.2
+        turn_radius = radius if radius is not None else 0.25
+        if max_speed <= 0:
+            return {"ok": False, "message": "Speed must be positive"}
+        if turn_radius <= 0:
+            return {"ok": False, "message": "Turn radius must be positive"}
+        node.movement_done.clear()
+        node.stop_requested = False
+        node.error_message = ""
+        node.success = False
+        target_rad = math.radians(amount)
+        angular_speed = max_speed / turn_radius
+        finish_tolerance_rad = math.radians(
+            finish_tolerance if finish_tolerance is not None else 8.0
+        )
+        start_pose, feedback_frame = node.get_current_pose_best()
+        if start_pose is None:
+            timeout_feedback = time.monotonic() + 2.0
+            while start_pose is None:
+                if time.monotonic() > timeout_feedback:
+                    return {"ok": False, "message": "No turn pose feedback from map/odom"}
+                time.sleep(0.01)
+                start_pose, feedback_frame = node.get_current_pose_best()
+        expected_duration = target_rad / angular_speed
+        deadline = time.monotonic() + max(8.0, expected_duration * 4.0)
+        node.active_movement = {
+            "type": "turn",
+            "sign": sign,
+            "target_angle_rad": target_rad,
+            "speed": max_speed,
+            "angular_speed": angular_speed,
+            "radius": turn_radius,
+            "finish_tolerance_rad": finish_tolerance_rad,
+            "feedback_frame": feedback_frame,
+            "turn_start_yaw": start_pose[2],
+            "turn_prev_yaw": start_pose[2],
+            "turn_unwrapped_yaw": start_pose[2],
+            "turn_progress_rad": 0.0,
+            "deadline": deadline,
+        }
+        node.status_message = (
+            f"Running turn: {direction} {amount}deg radius={turn_radius:.2f}m with {feedback_frame} feedback"
+        )
+        node.movement_done.wait()
+        if node.success:
+            return {"ok": True, "message": "Turn completed"}
         else:
             return {"ok": False, "message": node.error_message}
     elif direction in ANGULAR_DIRECTIONS:
@@ -1383,6 +1584,8 @@ def handle_request(node: BrainNode, request: dict) -> dict:
             look_interval = request.get("look_interval")
             detect_range = request.get("detect_range")
             wait_timeout = request.get("wait_timeout", request.get("deadtime"))
+            radius = request.get("radius")
+            finish_tolerance = request.get("finish_tolerance")
             return execute_single_step(
                 node,
                 direction,
@@ -1394,6 +1597,8 @@ def handle_request(node: BrainNode, request: dict) -> dict:
                 wait_timeout,
                 request.get("rotation_steps"),
                 request.get("destination_steps"),
+                radius,
+                finish_tolerance,
             )
         finally:
             node.command_lock.release()
@@ -1412,6 +1617,8 @@ def handle_request(node: BrainNode, request: dict) -> dict:
                 look_interval = step.get("look_interval")
                 detect_range = step.get("detect_range")
                 wait_timeout = step.get("wait_timeout", step.get("deadtime"))
+                radius = step.get("radius")
+                finish_tolerance = step.get("finish_tolerance")
                 res = execute_single_step(
                     node,
                     direction,
@@ -1423,6 +1630,8 @@ def handle_request(node: BrainNode, request: dict) -> dict:
                     wait_timeout,
                     step.get("rotation_steps"),
                     step.get("destination_steps"),
+                    radius,
+                    finish_tolerance,
                 )
                 if not res["ok"]:
                     return {"ok": False, "message": f"Step {i+1} failed: {res['message']}"}
@@ -1495,6 +1704,10 @@ def run_client(socket_path: str, command: str, args) -> int:
         payload["amount"] = args.amount
         if args.speed is not None:
             payload["speed"] = args.speed
+        if getattr(args, "radius", None) is not None:
+            payload["radius"] = args.radius
+        if getattr(args, "finish_tolerance", None) is not None:
+            payload["finish_tolerance"] = args.finish_tolerance
     elif command == "sequence":
         data = args.data.strip()
         try:
@@ -1555,6 +1768,8 @@ def main():
     move_parser.add_argument("direction", help="Direction of movement (forward, back, left, right, rotate_left, rotate_right, ccw, cw)")
     move_parser.add_argument("amount", type=float, help="Distance in meters or angle in degrees")
     move_parser.add_argument("speed", type=float, nargs="?", default=None, help="Optional speed (m/s or rad/s)")
+    move_parser.add_argument("radius", type=float, nargs="?", default=None, help="Optional turn radius for turn_left/turn_right")
+    move_parser.add_argument("finish_tolerance", type=float, nargs="?", default=None, help="Optional turn finish tolerance in degrees")
 
     sequence_parser = subparsers.add_parser("sequence", help="Send a sequence of movements to the service")
     sequence_parser.add_argument("data", help="JSON string or file path containing the movement sequence list")

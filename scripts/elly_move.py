@@ -9,7 +9,7 @@ import importlib.util
 
 # Add scripts directory to path to import directions
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from brain import LINEAR_DIRECTIONS, ANGULAR_DIRECTIONS, HOLD_DIRECTIONS
+from brain import LINEAR_DIRECTIONS, TURN_DIRECTIONS, ANGULAR_DIRECTIONS, HOLD_DIRECTIONS
 
 
 def load_movements():
@@ -49,15 +49,21 @@ def main():
             
     steps = None
     
-    if routine_name in LINEAR_DIRECTIONS or routine_name in ANGULAR_DIRECTIONS:
+    if routine_name in LINEAR_DIRECTIONS or routine_name in TURN_DIRECTIONS or routine_name in ANGULAR_DIRECTIONS:
         if len(typed_args) < 1:
             print(f"[x] Error: Usage: elly_move {routine_name} <amount> [speed]", file=sys.stderr)
             sys.exit(1)
         amount = typed_args[0]
         speed = typed_args[1] if len(typed_args) > 1 else None
+        radius = typed_args[2] if routine_name in TURN_DIRECTIONS and len(typed_args) > 2 else None
+        finish_tolerance = typed_args[3] if routine_name in TURN_DIRECTIONS and len(typed_args) > 3 else None
         step = {"direction": routine_name, "amount": amount}
         if speed is not None:
             step["speed"] = speed
+        if radius is not None:
+            step["radius"] = radius
+        if finish_tolerance is not None:
+            step["finish_tolerance"] = finish_tolerance
         steps = [step]
         
     elif routine_name in HOLD_DIRECTIONS:

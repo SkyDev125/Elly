@@ -83,6 +83,77 @@ class BrainTests(unittest.TestCase):
             ],
         )
 
+    def test_turn_left_sets_arc_motion_with_radius(self):
+        node = type("FakeNode", (), {})()
+
+        class Done:
+            def clear(self):
+                pass
+
+            def wait(self):
+                node.success = True
+
+        node.movement_done = Done()
+        node.stop_requested = False
+        node.error_message = ""
+        node.success = False
+        node.current_pose = (0.0, 0.0, 0.0)
+        node.latest_scan = None
+        node.last_scan_time = 0.0
+        node.get_current_pose_best = lambda: (node.current_pose, "odom_sub")
+
+        result = brain.execute_single_step(
+            node,
+            "turn_left",
+            360,
+            speed=0.3,
+            radius=0.2,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(node.active_movement["type"], "turn")
+        self.assertEqual(node.active_movement["sign"], 1.0)
+        self.assertEqual(node.active_movement["speed"], 0.3)
+        self.assertEqual(node.active_movement["radius"], 0.2)
+        self.assertAlmostEqual(node.active_movement["angular_speed"], 1.5)
+        self.assertEqual(node.active_movement["target_angle_rad"], math.radians(360))
+        self.assertEqual(node.active_movement["turn_progress_rad"], 0.0)
+        self.assertEqual(node.active_movement["feedback_frame"], "odom_sub")
+        self.assertAlmostEqual(
+            node.active_movement["finish_tolerance_rad"],
+            math.radians(8.0),
+        )
+
+    def test_turn_arc_keeps_constant_speed_until_stop(self):
+        class Twist:
+            def __init__(self):
+                self.linear = type("Linear", (), {"x": 0.0})()
+                self.angular = type("Angular", (), {"z": 0.0})()
+
+        node = brain.BrainNode.__new__(brain.BrainNode)
+        node.active_movement = {
+            "type": "turn",
+            "sign": 1.0,
+            "target_angle_rad": math.radians(720),
+            "turn_progress_rad": math.radians(700),
+            "finish_tolerance_rad": math.radians(8),
+            "speed": 0.3,
+            "angular_speed": 3.0,
+            "radius": 0.1,
+            "deadline": 9999999999,
+        }
+        node.stop_requested = False
+        node.latest_scan = None
+        node.current_pose = None
+        published = []
+        node.cmd_pub = type("Pub", (), {"publish": lambda self, msg: published.append(msg)})()
+
+        with patch.dict("sys.modules", {"geometry_msgs.msg": type("Msg", (), {"Twist": Twist})}):
+            brain.BrainNode.control_loop_cycle(node)
+
+        self.assertAlmostEqual(published[-1].linear.x, 0.3)
+        self.assertAlmostEqual(published[-1].angular.z, 3.0)
+
 
 class FakeRuntime:
     def __init__(
@@ -235,29 +306,65 @@ class FollowMeRunnerTests(unittest.TestCase):
 
 class MovementCompositionTests(unittest.TestCase):
     def test_follow_me_reuses_only_rotation_and_navigation_recipes(self):
+        position = movements.Position(1.0, 2.0, 90.0)
         step = movements.follow_me(
-            x=1.0,
-            y=2.0,
-            yaw_deg=90.0,
+            position,
             detect_range=0.5,
-            wait_timeout=12.0,
+            idle_timeout=12.0,
         )[0]
 
-        self.assertEqual(step["rotation_steps"], movements.rotate_180())
+        self.assertEqual(step["rotation_steps"], movements.rotate_left(150, 1.0))
         self.assertEqual(
             step["destination_steps"],
-            movements.move_to_point(1.0, 2.0, 90.0),
+            movements.move_to_point(position),
         )
         self.assertNotIn("detection_step", step)
         self.assertEqual(step["detect_range"], 0.5)
         self.assertEqual(step["wait_timeout"], 12.0)
 
-    def test_old_destination_name_remains_compatible(self):
-        self.assertEqual(
-            movements.move_to_behind_human_point(),
-            movements.move_to_point(),
+    def test_look_at_this_reuses_primitives(self):
+        steps = movements.look_at_this(
+            1.0,
+            2.0,
+            90.0,
+            "figure_eight",
+            0.2,
+            0.3,
+            0.4,
         )
-        self.assertEqual(movements.move_behind_human(), movements.move_to_point())
+        trace_steps = movements.trace_figure_eight(0.2, 0.3)
+
+        self.assertEqual(steps[:2], movements.low())
+        self.assertEqual(
+            steps[2:4],
+            movements.move_to_point(movements.Position(1.0, 2.0, 90.0)),
+        )
+        self.assertEqual(steps[4:4 + len(trace_steps)], trace_steps)
+        self.assertEqual(steps[-2:], movements.backward(0.4, 0.3) + movements.stop())
+
+    def test_look_at_this_can_use_default_object_with_circle(self):
+        steps = movements.look_at_this("circle")
+        trace_steps = movements.trace_circle()
+        self.assertEqual(steps[2:4], movements.move_to_point(movements.selected_object))
+        self.assertEqual(steps[4:4 + len(trace_steps)], trace_steps)
+
+    def test_trace_circle_uses_turning_feature_not_strafing_box(self):
+        steps = movements.trace_circle(0.2, 0.3)
+        directions = [step["direction"] for step in steps]
+
+        self.assertEqual(steps[0]["direction"], "turn_left")
+        self.assertEqual(steps[0]["speed"], 0.3)
+        self.assertEqual(steps[0]["radius"], 0.2)
+        self.assertGreater(steps[0]["amount"], 0)
+        self.assertEqual(directions.count("turn_left"), 1)
+        self.assertNotIn("rotate_left", directions)
+        self.assertNotIn("forward", directions)
+        self.assertNotIn("left", directions)
+        self.assertNotIn("right", directions)
+
+    def test_trace_figure_eight_uses_left_and_right_turns(self):
+        steps = movements.trace_figure_eight(0.2, 0.3)
+        self.assertEqual(steps[:2], movements.turn_left(360, 0.3, 0.2) + movements.turn_right(360, 0.3, 0.2))
 
 
 if __name__ == "__main__":

@@ -68,6 +68,27 @@ For example, the template `high` routine accepts a `clearance` parameter:
 elly_move high 0.50
 ```
 
+#### Look At This Cue
+
+`look_at_this` initiates interaction, navigates near a selected object, traces
+a compact attention pattern, then backs away so the object stays visible.
+The circle and figure-eight traces use the moving `turn_left` / `turn_right`
+arc primitives, not in-place rotation or lateral strafing.
+
+```bash
+elly_move look_at_this X Y YAW_DEG [figure_eight|circle] [TRACE_SIZE] [SPEED] [RETREAT_DISTANCE]
+```
+
+Examples:
+
+```bash
+elly_move look_at_this -1.2 0.4 90
+elly_move look_at_this -1.2 0.4 90 circle 0.25 0.3 0.4
+elly_move look_at_this circle
+```
+
+The no-coordinate form uses `selected_object` in `sequences/movements.py`.
+
 ---
 
 ### Option B: Single Step Movements
@@ -80,15 +101,19 @@ elly_move <direction> <amount> [speed]
 
 - **`direction`**:
   - Linear: `forward` (or `fwd`), `back` (or `backward`, `bwd`), `left`, `right`
+  - Turning arcs: `turn_left`, `turn_right`
   - Angular: `rotate_left` (or `left_turn`, `ccw`), `rotate_right` (or `right_turn`, `cw`)
 - **`amount`**: Distance in meters for linear, or angle in degrees for rotation.
-- **`speed`** *(optional)*: Speed in m/s (default `0.1`) for linear, or rad/s (default `0.3`) for rotation.
+- **`speed`** *(optional)*: Speed in m/s for linear/turning arcs, or rad/s for rotation.
+- **`radius`** *(optional for `turn_left` / `turn_right`)*: Arc radius in meters.
+- **`finish_tolerance`** *(optional for `turn_left` / `turn_right`)*: Degrees before the target where the arc can finish cleanly.
 
 **Examples:**
 ```bash
 elly_move forward 0.2
 elly_move left 0.15 0.08
 elly_move rotate_left 90
+elly_move turn_left 360 0.3 0.22 8
 ```
 
 ---
