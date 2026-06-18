@@ -7,124 +7,84 @@ Each dictionary should have:
   - "speed": (optional) speed in m/s (default 0.1) or rad/s (default 0.3)
 
 
-# Human location
-[-2.4, -1.4, 190]
 
-# In front of human
-[-1.6, -1.1, 190]
-
-# In front of human's path (broadside)
-[0, 0, 120]
-
-# Behind human
-[-3.2, -1.7, 30]
 """
 
-def low():
-    """Simple polite cue: advance 0.10m and stop."""
-    return [
-        {"direction": "forward", "amount": 0.1, "speed": 0.5},
-        {"direction": "stop", "amount": 1},
-    ]
+from dataclasses import dataclass
 
+@dataclass
+class Position:
+    x: float
+    y: float
+    yaw: float
 
-def medium():
-    """Insistent cue: perform 3 quick center-left-right-center sweeps."""
-    return low() + [
-        {"direction": "rotate_left", "amount": 10, "speed": 0.5},
-        {"direction": "rotate_right", "amount": 20, "speed": 0.5},
-        {"direction": "rotate_left", "amount": 20, "speed": 0.5},
-        {"direction": "rotate_right", "amount": 20, "speed": 0.5},
-        {"direction": "rotate_left", "amount": 10, "speed": 0.5},
-        {"direction": "stop", "amount": 1},
-    ]
+robot_starting = Position(0.85, 1.9, 90)
+human_objective = Position(-2.4, -1.4, 190)
+behind_human_objective = Position(-3.2, -1.7, 20)
+front_human_objective = Position(-1.5, -0.9, 190)
+blocking_human_path = Position(0, 0, 120)
 
+"""
+Primitive Routines
+"""
+def stop(seconds=1):
+    return [{"direction": "stop", "amount": seconds},]
 
-def high(clearance=0.40):
-    """High cue: advance 0.20m, sweep, return, and hold.
-    
-    This function accepts an optional parameter so you can customize it from the command line!
-    Example: elly_move high 0.5
-    """
-    return [
-        {"direction": "forward", "amount": 0.20, "speed": 1.0},
-        {"direction": "rotate_left", "amount": 20, "speed": 1},
-        {"direction": "rotate_right", "amount": 40, "speed": 1},
-        {"direction": "rotate_left", "amount": 40, "speed": 1},
-        {"direction": "rotate_right", "amount": 40, "speed": 1},
-        {"direction": "rotate_left", "amount": 15, "speed": 1},
-        {"direction": "stop", "amount": 1},
-    ]
+def forward(distance=0.1, speed=1.0):
+    return [{"direction": "forward", "amount": distance, "speed": speed}]
 
-def rotate_180():
-    return [
-        {"direction": "rotate_left", "amount": 150, "speed": 1.0},
-        {"direction": "stop", "amount": 1},
-    ]
+def backward(distance=0.1, speed=1.0):
+    return [{"direction": "back", "amount": distance, "speed": speed}]
 
-def move_to_point(x=-3.2, y=-1.7, yaw_deg=30):
+def rotate_left(degrees=10, speed=0.5):
+    return [{"direction": "rotate_left", "amount": degrees, "speed": speed}]
+
+def rotate_right(degrees=10, speed=0.5):
+    return [{"direction": "rotate_right", "amount": degrees, "speed": speed}]
+
+def move_to_point(position):
     """Navigate to an exact map coordinate and stop."""
-    return [
-        {"direction": "navigate", "amount": [x, y, yaw_deg]},
-        {"direction": "stop", "amount": 1},
-    ]
+    if not isinstance(position, Position):
+        raise TypeError("position must be a Position object")
+    return [{"direction": "navigate", "amount": [position.x, position.y, position.yaw]}] + stop()
 
-
-def creep_in(target_distance=0.4, speed=0.05, duration=30.0):
-    """Slowly creep forward, stopping when close to human's legs or obstacles.
-    
-    If the human moves away, the robot continues creeping forward to maintain target_distance.
-    
-    Example: elly_move creep_in 0.35 0.05 45
-    """
+def shove(distance=0.4, speed=0.05, duration=30.0):
     return [
         {
             "direction": "creep",
-            "amount": target_distance,
+            "amount": distance,
             "speed": speed,
             "duration": duration
         }
     ]
 
-
-def follow_me(
-    x=-3.2,
-    y=-1.7,
-    yaw_deg=30,
-    turn_speed=1.0,
-    look_interval=20.0,
-    detect_range=0.5,
-    wait_timeout=15.0,
-):
-    """Lead a person to a Nav2 goal with periodic LiDAR lookbacks.
-
-    The person enters the rear detection zone to start. Every look_interval
-    seconds, Nav2 is cancelled, the robot turns 180 degrees, and waits up to
-    wait_timeout seconds. The final goal uses the same timed person check.
-
-    turn_speed is retained for command compatibility. Follow-me deliberately
-    uses the proven rotate_180() routine at speed 1.0. Nav2 path speed is
-    configured in config/myagv_nav2.yaml.
-
-    Example: elly_move follow_me 1.5 -0.5 90 0.4 20 0.5 15
-    """
-    destination_steps = move_to_point(x, y, yaw_deg)
-    return [
-        {
+def follow_me(position, rotation_speed=1.0, lookback_interval=20.0, detect_range=0.5, idle_timeout=15.0):
+    destination_steps = move_to_point(position)
+    return [{
             "direction": "lead",
             "amount": destination_steps[0]["amount"],
-            "speed": turn_speed,
-            "look_interval": look_interval,
+            "speed": rotation_speed,
+            "look_interval": lookback_interval,
             "detect_range": detect_range,
-            "wait_timeout": wait_timeout,
-            "rotation_steps": rotate_180(),
+            "wait_timeout": idle_timeout,
+            "rotation_steps": rotate_left(150, 1.0),
             "destination_steps": destination_steps,
-        }
-    ]
+        }]
 
 
-def stop():
-    """Stop and hold position for 5 seconds."""
-    return [
-        {"direction": "stop", "amount": 5},
-    ]
+"""
+Interaction Initiation Routines
+"""
+def low():
+    return forward(0.1, 0.5) + stop()
+
+
+def medium():
+    return low() + rotate_left() + rotate_right(20) + rotate_left(20) + rotate_right(20) + rotate_left() + stop()
+
+
+def high():
+    return forward(0.2) + rotate_left(20,1) + rotate_right(40, 1) + rotate_left(40, 1) + rotate_right(40, 1) + rotate_left(15, 1) + stop()
+
+def test():
+    return move_to_point(blocking_human_path)
