@@ -111,7 +111,7 @@ def low():
     return forward(0.1, 0.5) + stop()
 
 def medium():
-    return low() + rotate_left() + rotate_right(20) + rotate_left(20) + rotate_right(20) + rotate_left() + stop()
+    return forward(0.1, 0.5) + rotate_left() + rotate_right(20) + rotate_left(20) + rotate_right(20) + rotate_left() + stop()
 
 def high():
     return forward(0.2) + rotate_left(20,1) + rotate_right(40, 1) + rotate_left(40, 1) + rotate_right(40, 1) + rotate_left(15, 1) + stop()
