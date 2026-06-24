@@ -13,6 +13,7 @@ fi
 mkdir -p "$REPO_ROOT/maps"
 
 if [ "$MAP_TYPE" == "2d" ]; then
+    python3 "$REPO_ROOT/scripts/elly.py" require lidar slam_2d || exit 1
     echo "--- Saving 2D Map Remotely ---"
     # 1. Save on Nano
     ssh $NANO_USER@$NANO_IP "source ~/myagv_ros2/install/setup.bash && ros2 run nav2_map_server map_saver_cli -f ~/$MAP_NAME --ros-args -p map_subscribe_transient_local:=false"

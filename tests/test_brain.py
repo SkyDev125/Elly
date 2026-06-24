@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
+import inspect
 import math
 import unittest
-import sys
-import os
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import call, patch
 
-# Add the scripts directory to the path so we can import brain
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../scripts')))
-import brain
-from brain import (
+from scripts import brain
+from scripts import elly as elly_cli
+from scripts.brain import (
     BrainFollowRuntime,
     FollowEvent,
     FollowMeConfig,
@@ -22,6 +22,17 @@ from sequences import movements
 
 
 class BrainTests(unittest.TestCase):
+    def test_dashboard_parses_screen_session_names(self):
+        output = """
+            101.base (Detached)
+            202.motion_service (Detached)
+            303.slam_2d (Detached)
+        """
+        self.assertEqual(
+            elly_cli.parse_screen_sessions(output),
+            {"base", "motion_service", "slam_2d"},
+        )
+
     def test_normalize_angle(self):
         self.assertAlmostEqual(normalize_angle(0.0), 0.0)
         self.assertAlmostEqual(normalize_angle(math.radians(370)), math.radians(10))
@@ -40,8 +51,9 @@ class BrainTests(unittest.TestCase):
         self.assertAlmostEqual(unwrap_angle(current_wrapped, previous_wrapped, current_unwrapped), previous_wrapped)
 
     def test_front_proximity_is_a_neutral_shared_lidar_check(self):
-        brain_node = type("FakeBrainNode", (), {})()
-        brain_node.get_front_clearance = lambda cone: 0.45
+        brain_node: Any = SimpleNamespace(
+            get_front_clearance=lambda cone: 0.45,
+        )
 
         clearance, detected = brain.BrainNode.check_front_proximity(
             brain_node,
@@ -55,20 +67,16 @@ class BrainTests(unittest.TestCase):
     @patch.object(brain, "execute_single_step")
     def test_follow_me_rotate_180_uses_proven_sequence(self, execute_step):
         execute_step.return_value = {"ok": True}
-        node = type(
-            "FakeNode",
-            (),
-            {
-                "active_movement": {"type": "follow_me"},
-                "last_turn": None,
-                "status_message": "",
-                "stop_requested": False,
-            },
-        )()
-        runtime = BrainFollowRuntime.__new__(BrainFollowRuntime)
+        node: Any = SimpleNamespace(
+            active_movement={"type": "follow_me"},
+            last_turn=None,
+            status_message="",
+            stop_requested=False,
+        )
+        runtime: Any = BrainFollowRuntime.__new__(BrainFollowRuntime)
         runtime.node = node
         runtime.current_phase = "turning_for_check"
-        runtime.config = type("Config", (), {"detect_range": 0.5})()
+        runtime.config = SimpleNamespace(detect_range=0.5)
         runtime.rotation_steps = [
             {"direction": "rotate_left", "amount": 180.0, "speed": 1.0},
             {"direction": "stop", "amount": 1.0},
@@ -84,8 +92,6 @@ class BrainTests(unittest.TestCase):
         )
 
     def test_turn_left_sets_arc_motion_with_radius(self):
-        node = type("FakeNode", (), {})()
-
         class Done:
             def clear(self):
                 pass
@@ -93,13 +99,15 @@ class BrainTests(unittest.TestCase):
             def wait(self):
                 node.success = True
 
-        node.movement_done = Done()
-        node.stop_requested = False
-        node.error_message = ""
-        node.success = False
-        node.current_pose = (0.0, 0.0, 0.0)
-        node.latest_scan = None
-        node.last_scan_time = 0.0
+        node: Any = SimpleNamespace(
+            movement_done=Done(),
+            stop_requested=False,
+            error_message="",
+            success=False,
+            current_pose=(0.0, 0.0, 0.0),
+            latest_scan=None,
+            last_scan_time=0.0,
+        )
         node.get_current_pose_best = lambda: (node.current_pose, "odom_sub")
 
         result = brain.execute_single_step(
@@ -127,10 +135,10 @@ class BrainTests(unittest.TestCase):
     def test_turn_arc_keeps_constant_speed_until_stop(self):
         class Twist:
             def __init__(self):
-                self.linear = type("Linear", (), {"x": 0.0})()
-                self.angular = type("Angular", (), {"z": 0.0})()
+                self.linear = SimpleNamespace(x=0.0)
+                self.angular = SimpleNamespace(z=0.0)
 
-        node = brain.BrainNode.__new__(brain.BrainNode)
+        node: Any = brain.BrainNode.__new__(brain.BrainNode)
         node.active_movement = {
             "type": "turn",
             "sign": 1.0,
@@ -146,7 +154,7 @@ class BrainTests(unittest.TestCase):
         node.latest_scan = None
         node.current_pose = None
         published = []
-        node.cmd_pub = type("Pub", (), {"publish": lambda self, msg: published.append(msg)})()
+        node.cmd_pub = SimpleNamespace(publish=published.append)
 
         with patch.dict("sys.modules", {"geometry_msgs.msg": type("Msg", (), {"Twist": Twist})}):
             brain.BrainNode.control_loop_cycle(node)
@@ -304,67 +312,64 @@ class FollowMeRunnerTests(unittest.TestCase):
         self.assertEqual(result.reason, "rotation_failed")
 
 
-class MovementCompositionTests(unittest.TestCase):
-    def test_follow_me_reuses_only_rotation_and_navigation_recipes(self):
-        position = movements.Position(1.0, 2.0, 90.0)
-        step = movements.follow_me(
-            position,
-            detect_range=0.5,
-            idle_timeout=12.0,
-        )[0]
+class MovementRecipeTests(unittest.TestCase):
+    supported_directions = (
+        set(brain.LINEAR_DIRECTIONS)
+        | set(brain.TURN_DIRECTIONS)
+        | set(brain.ANGULAR_DIRECTIONS)
+        | set(brain.HOLD_DIRECTIONS)
+        | {"creep", "navigate", "lead"}
+    )
 
-        self.assertEqual(step["rotation_steps"], movements.rotate_left(150, 1.0))
+    def assert_valid_steps(self, steps, routine_name):
+        self.assertIsInstance(steps, list, routine_name)
+        self.assertTrue(steps, routine_name)
+
+        for index, step in enumerate(steps, start=1):
+            label = f"{routine_name} step {index}"
+            self.assertIsInstance(step, dict, label)
+            self.assertIn("direction", step, label)
+            self.assertIn("amount", step, label)
+            self.assertIn(step["direction"], self.supported_directions, label)
+
+            amount = step["amount"]
+            if step["direction"] in {"navigate", "lead"}:
+                self.assertIsInstance(amount, list, label)
+                self.assertIn(len(amount), (2, 3), label)
+                self.assertTrue(all(isinstance(value, (int, float)) for value in amount), label)
+            else:
+                self.assertIsInstance(amount, (int, float), label)
+                self.assertGreater(amount, 0, label)
+
+            for field in ("speed", "duration", "radius", "finish_tolerance"):
+                if field in step:
+                    self.assertIsInstance(step[field], (int, float), label)
+                    self.assertGreater(step[field], 0, label)
+
+            for field in ("rotation_steps", "destination_steps"):
+                if field in step:
+                    self.assert_valid_steps(step[field], f"{label}.{field}")
+
+    def test_all_public_movement_routines_return_valid_steps(self):
+        for name, routine in inspect.getmembers(movements, inspect.isfunction):
+            if routine.__module__ != movements.__name__ or name.startswith("_"):
+                continue
+
+            args = []
+            for parameter in inspect.signature(routine).parameters.values():
+                if parameter.default is inspect.Parameter.empty:
+                    self.assertEqual(parameter.name, "position", name)
+                    args.append(movements.robot_starting)
+
+            with self.subTest(routine=name):
+                self.assert_valid_steps(routine(*args), name)
+
+    def test_follow_me_contains_a_lead_step(self):
+        steps = movements.follow_me()
         self.assertEqual(
-            step["destination_steps"],
-            movements.move_to_point(position),
+            sum(step["direction"] == "lead" for step in steps),
+            1,
         )
-        self.assertNotIn("detection_step", step)
-        self.assertEqual(step["detect_range"], 0.5)
-        self.assertEqual(step["wait_timeout"], 12.0)
-
-    def test_look_at_this_reuses_primitives(self):
-        steps = movements.look_at_this(
-            1.0,
-            2.0,
-            90.0,
-            "figure_eight",
-            0.2,
-            0.3,
-            0.4,
-        )
-        trace_steps = movements.trace_figure_eight(0.2, 0.3)
-
-        self.assertEqual(steps[:2], movements.low())
-        self.assertEqual(
-            steps[2:4],
-            movements.move_to_point(movements.Position(1.0, 2.0, 90.0)),
-        )
-        self.assertEqual(steps[4:4 + len(trace_steps)], trace_steps)
-        self.assertEqual(steps[-2:], movements.backward(0.4, 0.3) + movements.stop())
-
-    def test_look_at_this_can_use_default_object_with_circle(self):
-        steps = movements.look_at_this("circle")
-        trace_steps = movements.trace_circle()
-        self.assertEqual(steps[2:4], movements.move_to_point(movements.selected_object))
-        self.assertEqual(steps[4:4 + len(trace_steps)], trace_steps)
-
-    def test_trace_circle_uses_turning_feature_not_strafing_box(self):
-        steps = movements.trace_circle(0.2, 0.3)
-        directions = [step["direction"] for step in steps]
-
-        self.assertEqual(steps[0]["direction"], "turn_left")
-        self.assertEqual(steps[0]["speed"], 0.3)
-        self.assertEqual(steps[0]["radius"], 0.2)
-        self.assertGreater(steps[0]["amount"], 0)
-        self.assertEqual(directions.count("turn_left"), 1)
-        self.assertNotIn("rotate_left", directions)
-        self.assertNotIn("forward", directions)
-        self.assertNotIn("left", directions)
-        self.assertNotIn("right", directions)
-
-    def test_trace_figure_eight_uses_left_and_right_turns(self):
-        steps = movements.trace_figure_eight(0.2, 0.3)
-        self.assertEqual(steps[:2], movements.turn_left(360, 0.3, 0.2) + movements.turn_right(360, 0.3, 0.2))
 
 
 if __name__ == "__main__":

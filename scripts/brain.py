@@ -18,14 +18,20 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Any, Dict, List, Optional, Tuple
 
 # --- Setup Constants ---
 GALACTIC = "source /opt/ros/galactic/setup.bash"
 MYAGV = "source ~/myagv_ros2/install/setup.bash"
 ASTRA = "source ~/ros2_astra_ws/install/setup.bash"
+CAMERA_COMMAND = (
+    "ros2 launch orbbec_camera astra2.launch.py "
+    "uvc_backend:=v4l2 color_width:=640 color_height:=480 color_fps:=10 "
+    "color_format:=UYVY depth_width:=640 depth_height:=480 depth_fps:=10 "
+    "enable_ir:=false enable_sync_output_accel_gyro:=false time_domain:=device"
+)
 
 SCREEN_NAMES = {
-    "base": "base",
     "lidar": "lidar",
     "camera": "camera",
     "map_2d": "slam_2d",
@@ -34,9 +40,8 @@ SCREEN_NAMES = {
 }
 
 SERVICES = {
-    "base": f"{GALACTIC} && {MYAGV} && ros2 run myagv_odometry myagv_odometry_node",
     "lidar": f"{ASTRA} && {MYAGV} && ros2 launch myagv_odometry myagv_active.launch.py",
-    "camera": f"{ASTRA} && ros2 launch orbbec_camera astra2_updated.launch.py",
+    "camera": f"{ASTRA} && {CAMERA_COMMAND}",
     "map_2d": f"{GALACTIC} && {MYAGV} && ros2 run slam_gmapping slam_gmapping --ros-args -p use_sim_time:=false",
     "map_3d": f"{GALACTIC} && {MYAGV} && ros2 launch rtabmap_ros rtabmap.launch.py frame_id:=base_footprint subscribe_scan:=true scan_topic:=/scan subscribe_depth:=true approx_sync:=true rgb_topic:=/camera/color/image_raw depth_topic:=/camera/depth/image_raw camera_info_topic:=/camera/color/camera_info visual_odometry:=false odom_topic:=/odometry/filtered queue_size:=50 qos_scan:=2 rtabmapviz:=false",
     "motion": f"{GALACTIC} && {MYAGV} && python3 ~/scripts/brain.py service"
@@ -360,7 +365,7 @@ def stop_service(name: str) -> int:
         except Exception:
             pass
     subprocess.run(f"screen -XS {screen_name} quit", shell=True)
-    if name in ["base", "motion"]:
+    if name == "motion":
         publish_emergency_stop()
     print(f"[ok] Stopped service '{name}' (screen '{screen_name}').")
     return 0
@@ -439,31 +444,32 @@ class BrainNode:
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self.node)
         
-        self.current_pose = None  # (x, y, unwrapped_yaw)
-        self.prev_wrapped_yaw = None
+        self.current_pose: Optional[Tuple[float, float, float]] = None
+        self.prev_wrapped_yaw: Optional[float] = None
         self.unwrapped_yaw = 0.0
         self.odom_counter = 0
-        self.current_velocity = (0.0, 0.0, 0.0)
-        self.latest_scan = None
+        self.current_velocity: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self.latest_scan: Any = None
         self.last_scan_time = 0.0
 
         # Movement Execution state
-        self.active_movement = None
+        self.active_movement: Optional[Dict[str, Any]] = None
         self.movement_done = threading.Event()
         self.stop_requested = False
         self.status_message = "Idle"
         self.error_message = ""
         self.success = False
         self.command_lock = threading.Lock()
-        self.last_turn = None
+        self.last_turn: Optional[Dict[str, Any]] = None
+        self.nav_client: Any = None
 
     def get_logger(self):
         return self.node.get_logger()
 
     def get_tf_pose_sample(self, target_frame, source_frame='base_footprint'):
         try:
-            import rclpy
-            t = self.tf_buffer.lookup_transform(target_frame, source_frame, rclpy.time.Time())
+            from rclpy.time import Time
+            t = self.tf_buffer.lookup_transform(target_frame, source_frame, Time())
             pos = t.transform.translation
             ori = t.transform.rotation
             siny_cosp = 2.0 * (ori.w * ori.z + ori.x * ori.y)
@@ -984,8 +990,8 @@ class BrainFollowRuntime:
         ])
         self.destination_steps = list(destination_steps or [])
         self.current_phase = "waiting_initial"
-        self.active_navigation = None
-        if not hasattr(node, "nav_client"):
+        self.active_navigation: Any = None
+        if node.nav_client is None:
             node.nav_client = ActionClient(node.node, NavigateToPose, "navigate_to_pose")
 
     def set_state(self, phase: str, message: str):
@@ -1236,14 +1242,14 @@ class BrainFollowRuntime:
 
 def execute_follow_me(
     node: BrainNode,
-    amount,
-    speed: float = None,
-    look_interval: float = None,
-    detect_range: float = None,
-    wait_timeout: float = None,
-    rotation_steps=None,
-    destination_steps=None,
-) -> dict:
+    amount: Any,
+    speed: Optional[float] = None,
+    look_interval: Optional[float] = None,
+    detect_range: Optional[float] = None,
+    wait_timeout: Optional[float] = None,
+    rotation_steps: Optional[List[Dict[str, Any]]] = None,
+    destination_steps: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     destination_steps = list(destination_steps or [
         {"direction": "navigate", "amount": amount},
     ])
@@ -1316,17 +1322,17 @@ def execute_follow_me(
 def execute_single_step(
     node: BrainNode,
     direction: str,
-    amount,
-    speed: float = None,
-    duration: float = None,
-    look_interval: float = None,
-    detect_range: float = None,
-    wait_timeout: float = None,
-    rotation_steps=None,
-    destination_steps=None,
-    radius: float = None,
-    finish_tolerance: float = None,
-) -> dict:
+    amount: Any,
+    speed: Optional[float] = None,
+    duration: Optional[float] = None,
+    look_interval: Optional[float] = None,
+    detect_range: Optional[float] = None,
+    wait_timeout: Optional[float] = None,
+    rotation_steps: Optional[List[Dict[str, Any]]] = None,
+    destination_steps: Optional[List[Dict[str, Any]]] = None,
+    radius: Optional[float] = None,
+    finish_tolerance: Optional[float] = None,
+) -> Dict[str, Any]:
     if direction in ["navigate", "lead"]:
         if not isinstance(amount, list) or len(amount) < 2:
             return {"ok": False, "message": f"{direction.capitalize()} amount must be a list: [x, y] or [x, y, yaw]"}
@@ -1550,7 +1556,7 @@ def execute_single_step(
         return {"ok": False, "message": f"Unknown direction '{direction}'"}
 
 
-def handle_request(node: BrainNode, request: dict) -> dict:
+def handle_request(node: BrainNode, request: Dict[str, Any]) -> Dict[str, Any]:
     command = request.get("command")
     if command == "status":
         active = node.active_movement is not None
@@ -1578,6 +1584,8 @@ def handle_request(node: BrainNode, request: dict) -> dict:
             return {"ok": False, "message": "Robot is busy"}
         try:
             direction = request.get("direction")
+            if not isinstance(direction, str):
+                return {"ok": False, "message": "Direction must be a string"}
             amount = request.get("amount")
             speed = request.get("speed")
             duration = request.get("duration")
@@ -1610,7 +1618,11 @@ def handle_request(node: BrainNode, request: dict) -> dict:
             if not isinstance(steps, list):
                 return {"ok": False, "message": "Steps must be a list"}
             for i, step in enumerate(steps):
+                if not isinstance(step, dict):
+                    return {"ok": False, "message": f"Step {i+1} must be an object"}
                 direction = step.get("direction")
+                if not isinstance(direction, str):
+                    return {"ok": False, "message": f"Step {i+1} direction must be a string"}
                 amount = step.get("amount")
                 speed = step.get("speed")
                 duration = step.get("duration")
@@ -1698,7 +1710,7 @@ def run_service(socket_path: str):
 
 # --- Socket Client Implementation ---
 def run_client(socket_path: str, command: str, args) -> int:
-    payload = {"command": command}
+    payload: Dict[str, Any] = {"command": command}
     if command == "move":
         payload["direction"] = args.direction
         payload["amount"] = args.amount

@@ -10,6 +10,8 @@ once the robot is successfully localized.
 import sys
 import math
 import time
+from typing import Optional
+import elly as elly_console
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -31,7 +33,7 @@ class EllyAutoFinder(Node):
         self.latest_covariance = None
         self.state = 'INIT'  # INIT -> ROTATING -> TRANSLATING -> AVOID_OBSTACLE -> DONE | FAILED
         self.state_start_time = time.time()
-        self.search_start_time = None
+        self.search_start_time: Optional[float] = None
         self.last_scan_time = 0.0
         self.last_print_time = 0.0
         self.turn_dir = 1.0
@@ -164,7 +166,12 @@ class EllyAutoFinder(Node):
             
             if now - self.last_print_time > 1.5:
                 status_suffix = ""
-                if cov_x < self.cov_threshold_pos and cov_y < self.cov_threshold_pos and cov_yaw < self.cov_threshold_yaw:
+                if (
+                    cov_x < self.cov_threshold_pos
+                    and cov_y < self.cov_threshold_pos
+                    and cov_yaw < self.cov_threshold_yaw
+                    and self.search_start_time is not None
+                ):
                     time_remaining = 15.0 - (now - self.search_start_time)
                     if time_remaining > 0:
                         status_suffix = f" (Converged! Verifying for {time_remaining:.1f}s...)"
@@ -222,6 +229,8 @@ class EllyAutoFinder(Node):
                 print("[i] Obstacle cleared. Resuming translation...")
 
 def main():
+    if not elly_console.ensure_services(["lidar", "navigation"]):
+        sys.exit(1)
     rclpy.init()
     node = EllyAutoFinder()
     try:

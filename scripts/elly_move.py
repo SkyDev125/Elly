@@ -10,6 +10,7 @@ import importlib.util
 # Add scripts directory to path to import directions
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from brain import LINEAR_DIRECTIONS, TURN_DIRECTIONS, ANGULAR_DIRECTIONS, HOLD_DIRECTIONS
+import elly as elly_console
 
 
 def load_movements():
@@ -20,6 +21,9 @@ def load_movements():
         sys.exit(1)
         
     spec = importlib.util.spec_from_file_location("movements", movements_path)
+    if spec is None or spec.loader is None:
+        print(f"[x] Error: Could not load movement definitions from {movements_path}", file=sys.stderr)
+        sys.exit(1)
     movements = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(movements)
     return movements
@@ -116,7 +120,13 @@ def main():
         if not isinstance(step, dict) or "direction" not in step or "amount" not in step:
             print(f"[x] Error: Step {i+1} is invalid. Must be a dict with 'direction' and 'amount'", file=sys.stderr)
             sys.exit(1)
-            
+
+    required_services = ["lidar", "motion_service"]
+    if any(step["direction"] in ("navigate", "lead") for step in steps):
+        required_services.append("navigation")
+    if not elly_console.ensure_services(required_services):
+        sys.exit(1)
+
     json_str = json.dumps(steps)
     
     nano_ip = os.environ.get("NANO_IP")

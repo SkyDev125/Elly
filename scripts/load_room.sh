@@ -11,6 +11,7 @@ if [ -z "$NANO_IP" ]; then
 fi
 
 if [ "$MAP_TYPE" == "2d" ]; then
+    python3 "$REPO_ROOT/scripts/elly.py" require lidar || exit 1
     MAP_PATH="$REPO_ROOT/maps/$MAP_NAME.yaml"
     CONFIG_PATH="$REPO_ROOT/config/myagv_nav2.yaml"
     REMOTE_MAP_DIR="/home/er/maps"
@@ -30,10 +31,16 @@ if [ "$MAP_TYPE" == "2d" ]; then
 
     echo "--- Starting Remote Localization & Navigation (2D) in Background screen 'navigation' ---"
     CMD_LAUNCH="ros2 launch nav2_bringup bringup_launch.py map:=$REMOTE_MAP_DIR/$MAP_NAME.yaml params_file:=$REMOTE_CONFIG_DIR/myagv_nav2.yaml use_sim_time:=false"
-    ssh $NANO_USER@$NANO_IP "screen -dmS navigation bash -lc \"source /opt/ros/galactic/setup.bash && source ~/myagv_ros2/install/setup.bash && $CMD_LAUNCH\""
-    echo "[✔] Navigation service started in background screen 'navigation'."
+    ssh $NANO_USER@$NANO_IP "screen -dmS navigation bash -lc \"source /opt/ros/galactic/setup.bash && source ~/myagv_ros2/install/setup.bash && $CMD_LAUNCH >~/scripts/navigation.log 2>&1\""
+    if ! ssh $NANO_USER@$NANO_IP "bash ~/scripts/brain.sh navigation_wait"; then
+        ssh $NANO_USER@$NANO_IP "screen -XS navigation quit" >/dev/null 2>&1 || true
+        echo "[x] Navigation failed to become ready."
+        exit 1
+    fi
+    echo "[ok] Navigation is on and ready."
 
 elif [ "$MAP_TYPE" == "3d" ]; then
+    python3 "$REPO_ROOT/scripts/elly.py" require lidar camera || exit 1
     MAP_PATH="$REPO_ROOT/maps/$MAP_NAME.db"
     
     if [ ! -f "$MAP_PATH" ]; then
@@ -50,8 +57,13 @@ elif [ "$MAP_TYPE" == "3d" ]; then
     # Notice we REMOVED '--delete_db_on_start' and ADDED 'localization:=true'
     CMD_LOC="ros2 launch rtabmap_ros rtabmap.launch.py frame_id:=base_footprint subscribe_scan:=true scan_topic:=/scan subscribe_depth:=true approx_sync:=true rgb_topic:=/camera/color/image_raw depth_topic:=/camera/depth/image_raw camera_info_topic:=/camera/color/camera_info visual_odometry:=false odom_topic:=/odometry/filtered queue_size:=50 qos_scan:=2 rtabmapviz:=false localization:=true"
     
-    ssh $NANO_USER@$NANO_IP "screen -dmS rtabmap bash -lc \"source /opt/ros/galactic/setup.bash && source ~/myagv_ros2/install/setup.bash && source ~/ros2_astra_ws/install/setup.bash && $CMD_LOC\""
-    echo "[✔] 3D Localization started in background screen 'rtabmap'."
+    ssh $NANO_USER@$NANO_IP "screen -dmS rtabmap bash -lc \"source /opt/ros/galactic/setup.bash && source ~/myagv_ros2/install/setup.bash && source ~/ros2_astra_ws/install/setup.bash && $CMD_LOC >~/scripts/rtabmap.log 2>&1\""
+    if ! ssh $NANO_USER@$NANO_IP "bash ~/scripts/brain.sh rtabmap_wait"; then
+        ssh $NANO_USER@$NANO_IP "screen -XS rtabmap quit" >/dev/null 2>&1 || true
+        echo "[x] RTAB-Map localization failed to become ready."
+        exit 1
+    fi
+    echo "[ok] RTAB-Map localization is on and ready."
 
 else
     echo "[✘] Invalid map type. Scripts require '2d' or '3d'."

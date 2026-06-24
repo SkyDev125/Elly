@@ -18,11 +18,11 @@ class Position:
     y: float
     yaw: float
 
-robot_starting = Position(0.85, 1.9, 90)
-human_objective = Position(-2.4, -1.4, 190)
-behind_human_objective = Position(-3.2, -1.7, 20)
-front_human_objective = Position(-1.5, -0.9, 190)
-blocking_human_path = Position(0, 0, 110)
+robot_starting = Position(0.945119, -1.48997, -32.4422)
+human_objective = Position(0.0866141, 3.21257, 87.1589)
+behind_human_objective = Position(0.275744, 3.82844, -94.4796)
+front_human_objective = Position(-0.0226278, 2.20267, 88.6927)
+blocking_human_path = Position(-0.287587, 0.340654, -6.6172)
 
 """
 Primitive Routines
@@ -90,7 +90,7 @@ def trace_eight(size=0.1, speed=0.3):
     """Trace two opposite circular lobes using moving turn primitives."""
     return turn_left(330, speed, size) + turn_right(330, speed, size) + stop(1)
 
-def lead(position, rotation_speed=1.0, lookback_interval=25.0, detect_range=0.5, idle_timeout=15.0):
+def lead(position, rotation_speed=1.0, lookback_interval=30.0, detect_range=0.5, idle_timeout=15.0):
     destination_steps = move_to_point(position)
     return [{
             "direction": "lead",
@@ -108,16 +108,20 @@ def lead(position, rotation_speed=1.0, lookback_interval=25.0, detect_range=0.5,
 Interaction Initiation Routines
 """
 def low():
-    return forward(0.1, 0.5) + stop()
+    return backward(0.1, 0.5) + stop()
 
 def medium():
     return forward(0.1, 0.5) + rotate_left() + rotate_right(20) + rotate_left(20) + rotate_right(20) + rotate_left() + stop()
 
 def high():
-    return forward(0.2) + rotate_left(20,1) + rotate_right(40, 1) + rotate_left(40, 1) + rotate_right(40, 1) + rotate_left(15, 1) + stop()
+    return forward(0.2) + rotate_left(20,1) + rotate_right(40, 1) + rotate_left(40, 1) + rotate_right(40, 1) + rotate_left(10, 1) + stop()
+
+"""
+Movement Routines
+"""
 
 def look_at_this(trace_size=0.2, speed=0.3):
-    return low() + move_to_point(human_objective) + backward(trace_size, speed) + rotate_right(90) + trace_circle(trace_size, speed) + rotate_left(90) + backward(trace_size, speed) + stop()
+    return low() + move_to_point(human_objective) + backward(trace_size, speed) + rotate_right(90) + trace_circle(trace_size, speed) + trace_circle(trace_size, speed) + rotate_left(90) + backward(trace_size, speed) + stop()
 
 def follow_me():
     return move_to_point(robot_starting) + lead(behind_human_objective) + stop()
@@ -129,3 +133,5 @@ def shove():
     return move_to_point(behind_human_objective) + creep() + stop()
 
 # Could do refusal, where robot actively avoids looking at the person, if the person gets in front of him, he just turns away, and runs.
+def test():
+    return move_to_point(behind_human_objective) + stop()

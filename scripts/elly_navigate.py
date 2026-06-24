@@ -7,6 +7,7 @@ Usage:
 
 import sys
 import math
+import elly as elly_console
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
@@ -74,6 +75,9 @@ def main():
         yaw_deg = float(sys.argv[3]) if len(sys.argv) > 3 else 0.0
     except ValueError:
         print("[x] Error: Coordinates must be numbers")
+        sys.exit(1)
+
+    if not elly_console.ensure_services(["lidar", "navigation"]):
         sys.exit(1)
         
     rclpy.init()

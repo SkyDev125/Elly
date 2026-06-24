@@ -10,17 +10,51 @@ From the laptop:
 
 ```bash
 cd ~/Elly
-bash scripts/setup.sh
-source ~/.bashrc
+bash scripts/setup.sh 192.168.0.200
 ```
 
-The setup script:
+The robot IP is optional; without it, the installer prompts and defaults to
+`192.168.0.200`. The installer is repeatable and installs only missing
+packages. It:
 
-- Configures SSH access to the robot.
-- Installs `screen` on the Jetson if missing.
-- Deploys the switchboard (`brain.sh`) and the unified movement controller (`brain.py`).
-- Builds the local robot-description package (`myagv_description`).
-- Appends the Elly console commands and aliases to your laptop's `~/.bashrc`.
+- Requires Ubuntu 20.04 and configures the ROS 2 Galactic apt repository.
+- Installs ROS 2, Nav2, Gmapping, RTAB-Map, teleoperation, rosdep, and build tools.
+- Configures passwordless SSH and installs the required Jetson apt packages.
+- Installs and builds the required Elephant Robotics `myagv_ros2` and Orbbec
+  camera workspaces when missing, then verifies the base, LiDAR, Gmapping, and
+  camera packages.
+- Runs rosdep, builds `myagv_description`, and runs the local tests.
+- Deploys and compiles `brain.sh` and `brain.py`, then restarts the persistent
+  movement service.
+- Replaces the managed Elly command block in `~/.bashrc` without duplicating it.
+
+The installer does not start the base, LiDAR, camera, or mapping processes.
+Those remain explicit operator commands.
+
+For factory-reset recovery, the Jetson setup pins known-compatible myAGV and
+Orbbec source revisions, installs the Orbbec USB rules, and rebuilds missing
+packages. `slam_gmapping` is supplied by the Elephant Robotics workspace, not
+by an Ubuntu apt package.
+
+The Astra Pro2 camera uses the stock `astra2.launch.py` with the working Elly
+configuration applied explicitly: V4L2, 640x480 color and depth at 10 FPS,
+UYVY color, IR/IMU synchronization disabled, and device timestamps. This
+avoids relying on an untracked launch-file modification on one robot.
+
+After setup, a fresh interactive shell opens automatically with the Elly
+commands loaded. Pass `--no-shell` when running from automation or when you
+prefer to open a new terminal yourself.
+
+Controller updates do not require rerunning setup. Deploy them independently:
+
+```bash
+elly_deploy
+# or: bash scripts/deploy.sh 192.168.0.200
+```
+
+The deployment script validates local tests and syntax, uploads `brain.sh` and
+`brain.py`, restarts the movement service, waits for ROS startup, and displays
+the remote startup log when readiness fails.
 
 All Jetson movement and follow-me controller logic lives in `scripts/brain.py`;
 movement recipes remain in `sequences/movements.py`.
@@ -29,11 +63,18 @@ movement recipes remain in `sequences/movements.py`.
 
 ## Process Toggles
 
-Run `elly` to print the command reference. These toggle background screen sessions on the Jetson:
+Run `elly` to open the live operator dashboard. It checks the Jetson over SSH,
+shows every managed service as ON/OFF, and prints the compact command reference.
+These commands toggle background screen sessions on the Jetson:
+
+Commands declare their service dependencies. When a required service is off,
+the operator is told why it is needed and can start it immediately. Startup
+returns success only after the expected ROS topics, nodes, action servers, or
+controller socket become ready. Dependent services also prevent their hardware
+drivers from being stopped underneath them.
 
 - `camera_on` / `camera_off`: Orbbec Astra camera.
 - `lidar_on` / `lidar_off`: Base driver and YDLidar.
-- `base_on` / `base_off`: Base driver without LiDAR.
 - `map_2d_on` / `map_2d_off`: Gmapping (2D SLAM).
 - `map_3d_on` / `map_3d_off`: RTAB-Map (3D SLAM).
 - `motion_on` / `motion_off`: Persistent movement controller daemon.
