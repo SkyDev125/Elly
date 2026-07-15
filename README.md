@@ -2,11 +2,11 @@
 
 Remote ROS 2 control tools for an Elephant Robotics myAGV running ROS 2 Galactic on a Jetson Nano.
 
-The laptop acts as the operator console. Hardware drivers, mapping, and movement controller run on the Jetson in detached `screen` sessions over SSH, orchestrated by a remote process switchboard and a unified python movement service.
+The computer acts as the operator console. Hardware drivers, mapping, and movement controller run on the Jetson in detached `screen` sessions over SSH, orchestrated by a remote process switchboard and a unified python movement service.
 
 ## Setup
 
-From the laptop:
+From the computer:
 
 ```bash
 cd ~/Elly
@@ -88,7 +88,7 @@ First, ensure `motion_on` is running, then use `elly_move` to send commands.
 
 ### Option A: Edit and Run Python Routines (Recommended)
 
-You can write and compose your movement sequences directly in Python on your laptop by editing the file:
+You can write and compose your movement sequences directly in Python on your computer by editing the file:
 👉 [sequences/movements.py](file:///home/sky/Elly/sequences/movements.py)
 
 Each Python function in that file returns a list of step dictionaries. You can execute any of these routines by name:
